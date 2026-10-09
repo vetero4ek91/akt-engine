@@ -268,60 +268,28 @@ const sheet2 = [
 ];
 
 // =================== ЛИСТ 3 — повреждения ===================
-const colW = [2600, 4200, 1200, 1360];
-// Повреждение одной строкой: "Деталь — описание". Из описания движок сам вынимает:
-//  • объём (до 20% / 15 см / 30x10 см) → колонка «Объём»;
-//  • место на детали («в передней части», «с наружной стороны»…) → колонка «Место»
-//    (в именительном: «передняя часть»). Если места нет — «—», название детали не дублируется.
-// Старый формат {name, vid, mesto, obem} тоже работает.
-const LOC_NOUN = { "части":"часть","частях":"части","зоне":"зона","области":"область","стороне":"сторона","сторон":"стороны","стороны":"сторона","кромке":"кромка","углу":"угол","районе":"район","середине":"середина" };
-function nomAdj(w, noun) {
-  if (noun === "угол" || noun === "район") return w.replace(/нем$/,"ний").replace(/ом$/,"ый");
-  if (noun === "части" || noun === "стороны") return w.replace(/(них|ных|их|ых)$/, m => m);
-  return w.replace(/ней$/,"няя").replace(/(ой|ей)$/,"ая");
-}
-function nomLoc(ph) {
-  const w = ph.trim().split(/\s+/).slice(1);            // без предлога
-  const noun = LOC_NOUN[w[w.length-1].toLowerCase()] || w[w.length-1];
-  const adj = w.slice(0, -1).map(x => nomAdj(x, noun));
-  const out = [...adj, noun].join(" ");
-  return out.charAt(0).toUpperCase() + out.slice(1);
-}
-function cleanList(x) { return x.replace(/\s{2,}/g," ").replace(/\s+,/g,",").replace(/,\s*,/g,",").replace(/^[,\s]+|[,\s]+$/g,""); }
+// Повреждение одной строкой: "Деталь — вид, место и объём повреждения".
+// Таблица в 2 колонки: «Наименование» | «Вид, характер, место и объём повреждения».
+// Старый формат {name, vid, mesto, obem} тоже работает — склеивается в описание.
+const colW = [3000, 6360];
 function parseDam(d) {
   if (typeof d === "string") d = { text: d };
-  if (d.name !== undefined) return d;
-  const txt = d.text || "", i = txt.indexOf(" — ");
-  const name = i === -1 ? txt : txt.slice(0, i);
-  let vid = i === -1 ? "" : txt.slice(i + 3);
-  let obem = d.obem || "", mesto = d.mesto || "";
-  if (!obem) {
-    const re = /(?:^|,\s*|\s)((?:до|около|ок\.)?\s*\d+(?:[.,]\d+)?\s*(?:%|см|мм)(?:\s*[xх×]\s*\d+(?:[.,]\d+)?\s*(?:см|мм))?)/gi;
-    const found = []; vid = vid.replace(re, (m, g) => { found.push(g.trim()); return m.startsWith(",") ? "," : " "; });
-    obem = found.join(", ");
-  }
-  if (!mesto) {
-    const re = /(?:^|\s)((?:в|на|с|по)\s+(?:[а-яё-]+\s+){0,3}(?:части|частях|зоне|области|стороне|стороны|сторон|кромке|углу|районе|середине))(?=[\s,.;]|$)/gi;
-    const found = []; vid = vid.replace(re, (m, g) => { found.push(nomLoc(g)); return " "; });
-    mesto = found.join(", ");
-  }
-  vid = cleanList(vid);
-  return { ...d, name, vid: vid.charAt(0).toUpperCase() + vid.slice(1), mesto: mesto || "—", obem: obem || "—" };
+  let name, desc;
+  if (d.name !== undefined) { name = d.name; desc = [d.vid, d.mesto, d.obem].filter(Boolean).join(", "); }
+  else { const txt = d.text || "", i = txt.indexOf(" — "); name = i === -1 ? txt : txt.slice(0, i); desc = i === -1 ? "" : txt.slice(i + 3); }
+  desc = desc.trim();
+  return { ...d, name, desc: desc.charAt(0).toUpperCase() + desc.slice(1) };
 }
 function damRow(n, d) {
   d = parseDam(d);
   return row(
     cell(p([t(`${n}. ${d.name}`,15,true)]), colW[0]),
-    cell(p([t(d.vid || "",15)]), colW[1]),
-    cell(p([t(d.mesto || "",15)]), colW[2]),
-    cell(p([t(d.obem || "",15)]), colW[3]),
+    cell(p([t(d.desc,15)]), colW[1]),
   );
 }
 const damHeader = new TableRow({ tableHeader: true, children: [
   cell(p([t("Наименование поврежденных деталей (узлов, агрегатов)",15,true)]),colW[0]),
-  cell(p([t("Вид, характер",15,true)]),colW[1]),
-  cell(p([t("Место",15,true)]),colW[2]),
-  cell(p([t("Объем (степень) повреждения",15,true)]),colW[3]),
+  cell(p([t("Вид, характер, место и объем повреждения",15,true)]),colW[1]),
 ]});
 const sheet3 = [
   new Paragraph({ children: [new PageBreak()] }),
