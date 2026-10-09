@@ -191,7 +191,7 @@ const sheet1 = [
   p(choice(["Выезд", "Фото"], D.mode, 16), AlignmentType.RIGHT),
   // СК и полис — таблицей без рамок, чтобы ничего не «уезжало»
   tbl([1700,3000,2500,2160], [
-    row(cell(p([t("Название СК",16,true)]),1700,{bd:noBorders}), cell(p([val("Росгосстрах")]),3000,{bd:ulOnly}),
+    row(cell(p([t("Название СК",16,true)]),1700,{bd:noBorders}), cell(p([val(D.insurer || "Росгосстрах")]),3000,{bd:ulOnly}),
         cell(p([t("Страховой полис №",16,true)],AlignmentType.RIGHT),2500,{bd:noBorders}), cell(p([val(D.polis)]),2160,{bd:ulOnly})),
     row(cell(p([t("СК виновника",16,true)]),1700,{bd:noBorders}), cell(p([val(D.culpritSK)]),3000,{bd:ulOnly}),
         cell(p([t("Полис виновника №",16,true)],AlignmentType.RIGHT),2500,{bd:noBorders}), cell(p([val(D.culpritPolis)]),2160,{bd:ulOnly})),
