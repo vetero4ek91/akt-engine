@@ -269,7 +269,23 @@ const sheet2 = [
 
 // =================== ЛИСТ 3 — повреждения ===================
 const colW = [2600, 4200, 1200, 1360];
+// Повреждение можно задать одной строкой: "Деталь — описание[, объём]".
+// Объём (до 20% / 15 см / 30x10 см) вынимается в колонку «Объём» сам,
+// «Место» = название детали, если не указано отдельно. Старый формат {name, vid, mesto, obem} тоже работает.
+function parseDam(d) {
+  if (typeof d === "string") d = { text: d };
+  if (d.name !== undefined) return d;
+  const txt = d.text || "", i = txt.indexOf(" — ");
+  const name = i === -1 ? txt : txt.slice(0, i);
+  let vid = i === -1 ? "" : txt.slice(i + 3), obem = d.obem || "";
+  if (!obem) {
+    const m = vid.match(/(?:^|,\s*|\s)((?:до|около|ок\.)?\s*\d+(?:[.,]\d+)?\s*(?:%|см|мм)(?:\s*[xх×]\s*\d+(?:[.,]\d+)?\s*(?:см|мм))?)/i);
+    if (m) { obem = m[1].trim(); vid = (vid.slice(0, m.index) + vid.slice(m.index + m[0].length)).replace(/\s*,\s*,/g, ",").replace(/^[,\s]+|[,\s]+$/g, ""); }
+  }
+  return { ...d, name, vid, mesto: d.mesto || name.toLowerCase(), obem };
+}
 function damRow(n, d) {
+  d = parseDam(d);
   return row(
     cell(p([t(`${n}. ${d.name}`,15,true)]), colW[0]),
     cell(p([t(d.vid || "",15)]), colW[1]),
@@ -346,7 +362,7 @@ const sheet5 = !KASKO ? [] : [
   ...sp(1),
   tbl(k5W, [
     new TableRow({ tableHeader: true, children: ["№","Замена","Ремонт, час.","Окрас.","Диагн."].map((h, i) => cell(p([t(h,15,true)],AlignmentType.CENTER),k5W[i])) }),
-    ...damages.map((d, i) => row(
+    ...damages.map(parseDam).map((d, i) => row(
       cell(p([t(String(i + 1),15)],AlignmentType.CENTER),k5W[0]),
       ...[d.zamena, d.remont, d.okraska, d.diagn].map((v, j) => cell(p([t(k5mk(v),15,true)],AlignmentType.CENTER),k5W[j+1])),
     )),
