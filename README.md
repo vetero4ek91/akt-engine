@@ -5,5 +5,6 @@
 
 - `favorit_engine.js` — акт осмотра ООО «Фаворит» (Росгосстрах), лист 5 для КАСКО
 - `lat_engine.js` — акт осмотра LAT / Т-Страхование
+- `evak_engine.js` — акт осмотра при эвакуации (ФАВОРИТ)
 
 Использование: `require("./favorit_engine.js")({ D, KOMPL, damages, ..., OUT_FILE })`
