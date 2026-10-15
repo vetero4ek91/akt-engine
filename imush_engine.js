@@ -47,10 +47,10 @@ module.exports = function build(cfg) {
   // D.ownerNote = "" — пусто (подписывает ручкой), либо любой свой текст («Отказ» и т.п.)
   const OWNER_NOTE = D.ownerNote === undefined ? "С актом ознакомлен, акт не подписан" : D.ownerNote;
   const sigImg = () => new ImageRun({
-    type: "png", data: SIG_PNG, transformation: { width: 50, height: 36 },
+    type: "png", data: SIG_PNG, transformation: { width: 58, height: 42 },
     floating: {
       horizontalPosition: { relative: HorizontalPositionRelativeFrom.CHARACTER, offset: 0 },
-      verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: -150000 },
+      verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: -120000 },
       wrap: { type: TextWrappingType.NONE }, allowOverlap: true, layoutInCell: true, zIndex: 10,
     },
   });
