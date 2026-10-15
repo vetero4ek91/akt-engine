@@ -12,8 +12,8 @@ const fs = require('fs');
 //
 // Листы (порядок вывода):
 //   титул — всегда
-//   D.buildings[] → «СТРОЕНИЕ», по листу на постройку (дом)
-//   D.scheme      → «ОБЩАЯ СХЕМА МЕСТА ОСМОТРА» (дом — всегда)
+//   D.scheme      → «ОБЩАЯ СХЕМА МЕСТА ОСМОТРА» (дом — всегда), сразу после титула; D.scheme.note — подпись под схемой
+//   D.buildings[] → «СТРОЕНИЕ», по листу на постройку; b.total: true|"текст" — сгорело полностью (100% по всем элементам, п.8 100/100)
 //   D.flat        → «КВАРТИРА» (опционально, по умолчанию не выводится)
 //   D.items[] / D.itemsTotal → «ДОМАШНЕЕ и/или другое ИМУЩЕСТВО»
 //   D.rooms[]     → «ВНУТРЕННЯЯ ОТДЕЛКА И ИНЖЕНЕРНОЕ ОБОРУДОВАНИЕ», по листу на помещение
@@ -248,7 +248,7 @@ module.exports = function build(cfg) {
     const inoeLines = [0, 1, 2].map(i => row([cell(P(t(i === 0 && D.cause === "inoe" ? nz(D.causeOther) : "", { b: true, sz: 17 })), { w: 4200 })], { h: 240 }));
     const half = Math.floor(W / 2);
     const body = [
-      P(t("ООО «ФАВОРИТ»", { b: true, sz: 40 }), { a: C, border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: "7030A0", space: 4 } }, after: 160 }),
+      P([t("ООО «ФАВОРИТ»", { b: true, sz: 40 }), ...(D.actNo ? [t("     " + D.actNo, { b: true, sz: 30, u: true })] : [])], { a: C, border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: "7030A0", space: 4 } }, after: 160 }),
       layout([1400, 3200, 4300, W - 8900], [
         P(t("АКТ №", { b: true, sz: 26 }), { a: R }),
         boxes(D.actNo, [Math.max(9, String(D.actNo || "").length)], 300),
@@ -309,7 +309,7 @@ module.exports = function build(cfg) {
   // элемент: { mat, dmg: [[описание, размер], ...], pct: "3%" } ; нет элемента → «не повреждено»
   function dmgLines(el, minN, pctLabel) {
     const lines = [];
-    if (!el || ((!el.dmg || !el.dmg.length) && !el.pct)) lines.push([el && el.note ? el.note : ND, el && el.note ? "" : ND]);
+    if (!el || ((!el.dmg || !el.dmg.length) && !el.pct)) lines.push([el && el.note ? el.note : ND, "—"]);
     else {
       (el.dmg || []).forEach(d => lines.push([d[0], d[1]]));
       if (el.pct) lines.push([pctLabel, el.pct]);
@@ -333,6 +333,7 @@ module.exports = function build(cfg) {
       ], { w: W - 500, span: nCols - 1 }),
     ]);
   }
+  const bldSecs = [];
   (D.buildings || []).forEach(b => {
     const W = LAND_W;
     const cols = [500, 3000, 1900, W - 500 - 3000 - 1900 - 3400, 3400];
@@ -340,7 +341,9 @@ module.exports = function build(cfg) {
       const el = (b.el || {})[k];
       return {
         lead: [[P(t(`${i + 1}.`, { b: true, sz: 20 }))], elName(name, h), [P(t(nz(el && el.mat), { sz: 18, b: true }), { a: C })]],
-        lines: dmgLines(el, minN, `Общий процент повреждения элемента «${name.toLowerCase()}» в целом`),
+        lines: b.total
+          ? (() => { const l = [[b.total === true ? "сгорело полностью, без годных остатков" : b.total, "100%"]]; while (l.length < minN) l.push(["", ""]); return l; })()
+          : dmgLines(el, minN, `Общий процент повреждения элемента «${name.toLowerCase()}» в целом`),
       };
     });
     const er = elementRows(cols, items, 3, 2).map(x => row(x.cells, { h: x.h }));
@@ -358,9 +361,9 @@ module.exports = function build(cfg) {
       row([...field("Хозяйственное назначение", b.purpose, hc[0], hc[1]), ...field("Количество дверей, вкл. входную", b.doors, hc[2], hc[3]), ...field("Количество окон", b.windows, hc[4], hc[5])]),
       row([...field("Размер (длина*ширина*высота)", b.size, hc[0], hc[1]), ...field("Год возведения", b.year, hc[2], hc[3]), ...field("Год последнего ремонта", b.repairYear, hc[4], hc[5])]),
     ]);
-    sections.push({ properties: landProps, children: [
+    bldSecs.push({ properties: landProps, children: [
       P(t("СТРОЕНИЕ", { b: true, sz: 24 }), { a: R }), head, P(t(""), { after: 80 }),
-      table(cols, [hdr, ...er, p8Row(b.p8, W, 8, 5)]),
+      table(cols, [hdr, ...er, p8Row(b.p8 || (b.total ? { otdelka: "100%", inzh: "100%" } : undefined), W, 8, 5)]),
       P(t(""), { after: 60 }), signBlock(W),
     ] });
   });
@@ -372,9 +375,11 @@ module.exports = function build(cfg) {
     sections.push({ properties: portProps, children: [
       P(t("ОБЩАЯ СХЕМА МЕСТА ОСМОТРА", { b: true, sz: 24 }), { a: R, after: 120 }),
       grid(cols, rows, cw, rh, shapes),
+      ...(D.scheme.note ? [P(t(D.scheme.note, { b: true, sz: 20 }), { before: 80 })] : []),
       P(t(""), { after: 120 }), signBlock(W),
     ] });
   }
+  sections.push(...bldSecs);
 
   // =================== КВАРТИРА (опционально) ===================
   if (D.flat) {
@@ -454,7 +459,7 @@ module.exports = function build(cfg) {
       body = D.items.map((it, i) => row([
         r(`${i + 1}.`, { w: cols[0] }), r(it.name, { w: cols[1], a: L }), r(it.year, { w: cols[2] }), r(it.price, { w: cols[3] }),
         r(it.descr, { w: cols[4], a: L }), r(it.pct, { w: cols[5] }),
-        r(it.shown === false ? "нет" : "да", { w: cols[6] }), r(it.shown === false ? nz(it.reason, "4. - иное") : "—", { w: cols[7], a: it.shown === false ? L : C }),
+        r(it.shown === false ? "нет" : "да", { w: cols[6] }), r(it.shown === false ? nz(it.reason, D.cause === "pozhar" ? "1" : "4. - иное") : "—", { w: cols[7], a: it.shown === false ? L : C }),
       ], { h: 300 }));
     }
     sections.push({ properties: landProps, children: [
