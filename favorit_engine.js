@@ -9,6 +9,8 @@ const fs = require('fs');
 // Движок акта: пустая форма. Данные, подпись и ФИО эксперта передаются снаружи.
 module.exports = function build(cfg) {
   const { D, KOMPL, LIGHT, CLEAN, SPRAVKA, DEMONTAZH, STOA, MATCH, REPAIRABLE, HIDDEN, KASKO, damages, OUT_FILE, SIGN_EXPERT, OWNER_MODE, OWNER_NOTE, SIG_RLE, EXPERT } = cfg;
+  // REPAIRABLE: true / false / "razbor"; null — авто: до 10 повреждений — подлежит, 10 и больше — после разборки
+  const REP = (REPAIRABLE === null || REPAIRABLE === undefined || REPAIRABLE === "auto") ? (damages.length >= 10 ? "razbor" : true) : REPAIRABLE;
 // ===================================================================
 // ПОДПИСИ — настройка под конкретный акт
 // ===================================================================
@@ -239,7 +241,7 @@ const sheet1 = [
 const sheet2 = [
   new Paragraph({ children: [new PageBreak()] }),
   sigLines([
-    { label: "Собственник", fio: D.owner, note: OWNER_NOTE },
+    { label: "Собственник", fio: [D.owner, D.phone ? "тел. " + D.phone : ""].filter(Boolean).join(", "), note: OWNER_NOTE },
     { label: "Довер. лицо", fio: D.proxy, note: OWNER_MODE === "proxy" ? OWNER_NOTE : "" },
   ], 14+BUMP),
   ...sp(1),
@@ -324,8 +326,9 @@ const sheet4 = [
   p([t("Заключение (иное): ",16,true), val(D.conclusion || "Нет")]),
   ...sp(1),
   tbl([9360], [
-    row(cell(p([t(ck(REPAIRABLE)+" ТС подлежит ремонту",16,REPAIRABLE)]),9360)),
-    row(cell(p([t(ck(!REPAIRABLE)+" ТС не подлежит ремонту",16,!REPAIRABLE)]),9360)),
+    row(cell(p([t(ck(REP===true)+" ТС подлежит ремонту",16,REP===true)]),9360)),
+    row(cell(p([t(ck(REP===false)+" ТС не подлежит ремонту",16,REP===false)]),9360)),
+    row(cell(p([t(ck(REP==="razbor")+" Окончательный вывод о целесообразности ремонта ТС возможен только после разборки (дефектовки)",16,REP==="razbor")]),9360)),
     row(cell(p([t("Информация о пробах и элементах ТС, взятых для исследования:",16,true)]),9360)),
     row(cell(p([t("☒ Пробы материала и элементов транспортного средства не брались.",16,true)]),9360)),
     row(cell(p([t("☐ Пробы материала и элементов транспортного средства взяты",16)]),9360)),
