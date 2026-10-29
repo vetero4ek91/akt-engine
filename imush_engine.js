@@ -22,7 +22,11 @@ const fs = require('fs');
 //   openings: [{ type: "window"|"door", wall: "top"|"bottom"|"left"|"right", from: 0.5, w: 1.2,
 //                open: "in"|"out", hinge: "start"|"end" }]   — from: м от левого (верх/низ) или верхнего (лев/прав) угла
 //   stoves:   [{ x: 0.3, y: 0.3, w: 1, h: 1 }] или { x, y, w: 0.7, round: true } — м от левого верхнего угла объекта
-// Для плана помещения без plan.objects (рисуется по rm.size) — rm.plan = { openings: [...], stoves: [...] }.
+//   hatch: true — весь объект заштрихован (сгорел/разрушен); zones: [{ x, y, w, h }] — зоны повреждения штриховкой
+//   marks:    [{ x, y, type: "leak"|"fire", text: "прорыв подводки" }] — место протечки ⊙ / очаг пожара ⊗
+// Для плана помещения без plan.objects (рисуется по rm.size) — rm.plan = { openings, stoves, zones, marks, hatch }.
+// Общая схема: scheme.gaps: [{ a: "Жилой дом", b: "Баня", m: 6 }] — размерная линия между строениями (m не задано — по координатам);
+//   scheme.north: true — стрелка «С» в правом верхнем углу. Под схемой/планом автоматически пишутся «Обозначения: ...».
 module.exports = function build(cfg) {
   const { D, SIGN_EXPERT, EXPERT, SIG_RLE, OUT_FILE } = cfg;
 
@@ -176,7 +180,7 @@ module.exports = function build(cfg) {
     const ih = Buffer.alloc(13); ih.writeUInt32BE(W, 0); ih.writeUInt32BE(H, 4); ih[8] = 8; ih[9] = 6;
     return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', ih), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
   }
-  function overlay(items, cols, rows, cw, rh) {
+  function overlay(items, cols, rows, cw, rh, behind) {
     const K = 0.2; // пикселей на twip (≈3x от 96 dpi)
     const W = Math.ceil(cols * cw * K), H = Math.ceil(rows * rh * K);
     const px = Buffer.alloc(W * H * 4);
@@ -216,7 +220,7 @@ module.exports = function build(cfg) {
     const unit = Math.min(cw, rh) * K;          // размер клетки в пикселях
     const LW = Math.max(3, 25 * K);             // толщина линии ≈ рамка стены (1,25 pt)
     const TH = Math.max(LW * 1.8, unit * 0.2);    // полутолщина значка окна поперёк стены
-    items.forEach(it => {
+    [...items].sort((a, b) => ({ hatch: 0, clear: 1 }[a.kind] ?? 2) - ({ hatch: 0, clear: 1 }[b.kind] ?? 2)).forEach(it => { // штриховка снизу
       if (it.kind === "window" || it.kind === "door") {
         const a = [cx(it.p1[0]), cy(it.p1[1])], b = [cx(it.p2[0]), cy(it.p2[1])];
         const len = Math.hypot(b[0] - a[0], b[1] - a[1]); if (len < 1) return;
@@ -234,6 +238,37 @@ module.exports = function build(cfg) {
           const leaf = [hinge[0] + len * (Math.cos(ang) * d[0] + Math.sin(ang) * n[0] * s), hinge[1] + len * (Math.cos(ang) * d[1] + Math.sin(ang) * n[1] * s)];
           line(hinge, leaf, LW * 0.8);                             // полотно открыто под углом
         }
+      } else if (it.kind === "hatch") {
+        const x0 = cx(it.x), y0 = cy(it.y), x1 = cx(it.x + it.w), y1 = cy(it.y + it.h), sp = unit * (it.full ? 0.45 : 0.32);
+        for (let c = x0 - (y1 - y0); c < x1; c += sp * Math.SQRT2) { // линии 45°: x = c + (y1 - y)
+          const ya = Math.max(y0, y1 - (x1 - c)), yb = Math.min(y1, y1 - (x0 - c));
+          if (yb - ya > 0.5) line([c + (y1 - ya), ya], [c + (y1 - yb), yb], LW * 0.45);
+        }
+        if (!it.full) { const r = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]; r.forEach((p, i) => line(p, r[(i + 1) % 4], LW * 0.5)); }
+      } else if (it.kind === "clear") {
+        fill([[cx(it.x), cy(it.y)], [cx(it.x + it.w), cy(it.y)], [cx(it.x + it.w), cy(it.y + it.h)], [cx(it.x), cy(it.y + it.h)]], WHT);
+      } else if (it.kind === "mark") {
+        const mx = cx(it.x), my = cy(it.y), r = unit * 0.42, N = 48;
+        const pt = k => [mx + r * Math.cos(k), my + r * Math.sin(k)];
+        fill(Array.from({ length: N }, (_, i) => pt(2 * Math.PI * i / N)), WHT);
+        for (let i = 0; i < N; i++) line(pt(2 * Math.PI * i / N), pt(2 * Math.PI * (i + 1) / N), LW * 0.8);
+        if (it.type === "fire") { const d = r * 0.7; line([mx - d, my - d], [mx + d, my + d], LW * 0.8); line([mx - d, my + d], [mx + d, my - d], LW * 0.8); }
+        else fill(Array.from({ length: N }, (_, i) => [mx + r * 0.42 * Math.cos(2 * Math.PI * i / N), my + r * 0.42 * Math.sin(2 * Math.PI * i / N)]), BLK);
+      } else if (it.kind === "dim") {
+        const a = [cx(it.p1[0]), cy(it.p1[1])], b = [cx(it.p2[0]), cy(it.p2[1])], L = Math.hypot(b[0] - a[0], b[1] - a[1]); if (L < 2) return;
+        const u = [(b[0] - a[0]) / L, (b[1] - a[1]) / L], n = [-u[1], u[0]], tk = unit * 0.25, ar = unit * 0.3;
+        line(a, b, LW * 0.5);
+        [[a, 1], [b, -1]].forEach(([p, s]) => { // стрелки на концах + засечки
+          line(p, [p[0] + s * u[0] * ar + n[0] * ar * 0.4, p[1] + s * u[1] * ar + n[1] * ar * 0.4], LW * 0.5);
+          line(p, [p[0] + s * u[0] * ar - n[0] * ar * 0.4, p[1] + s * u[1] * ar - n[1] * ar * 0.4], LW * 0.5);
+          line([p[0] - n[0] * tk, p[1] - n[1] * tk], [p[0] + n[0] * tk, p[1] + n[1] * tk], LW * 0.5); });
+      } else if (it.kind === "north") { // стрелка на север и буква «С» (дугой, без шрифтов)
+        const x = cx(it.x), y0 = cy(it.y), u = unit, top = [x, y0 + u * 1.15], bot = [x, y0 + u * 2.6];
+        line(top, bot, LW * 0.7);
+        fill([top, [x - u * 0.28, top[1] + u * 0.55], [x + u * 0.28, top[1] + u * 0.55]], BLK);
+        const r = u * 0.42, c = [x, y0 + u * 0.5], N = 24;
+        for (let i = 0; i < N; i++) { const k0 = Math.PI * (0.25 + 1.5 * i / N), k1 = Math.PI * (0.25 + 1.5 * (i + 1) / N);
+          line([c[0] + r * Math.cos(k0), c[1] - r * Math.sin(k0)], [c[0] + r * Math.cos(k1), c[1] - r * Math.sin(k1)], LW * 0.8); }
       } else if (it.kind === "stove") {
         const x0 = cx(it.x), y0 = cy(it.y), x1 = cx(it.x + it.w), y1 = cy(it.y + it.h);
         if (it.round) {
@@ -254,7 +289,7 @@ module.exports = function build(cfg) {
       floating: {
         horizontalPosition: { relative: HorizontalPositionRelativeFrom.CHARACTER, offset: Math.round(offX * 635) },
         verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: 0 },
-        wrap: { type: TextWrappingType.NONE }, allowOverlap: true, layoutInCell: true, zIndex: 5,
+        wrap: { type: TextWrappingType.NONE }, allowOverlap: true, layoutInCell: true, zIndex: behind ? 1 : 5, behindDocument: !!behind,
       } });
   }
 
@@ -274,14 +309,18 @@ module.exports = function build(cfg) {
       }
     });
     // значки (окна, двери, печи) — прозрачная картинка поверх сетки, якорь в первой пустой клетке верхнего ряда
-    const ov = shapes.draw && shapes.draw.length ? overlay(shapes.draw, cols, rows, cw, rh) : null;
+    // штриховка и подложки — ПОД текстом (за таблицей), остальные значки — поверх рамок
+    const low = it => it.kind === "hatch" || it.kind === "clear";
+    const dr = shapes.draw || [], back = dr.filter(low), front = dr.filter(it => !low(it));
+    const ovB = back.length ? overlay(back, cols, rows, cw, rh, true) : null, ovF = front.length ? overlay(front, cols, rows, cw, rh) : null;
+    const ov = ovB || ovF ? (off) => [ovB && ovB(off), ovF && ovF(off)].filter(Boolean) : null;
     const anchorC = ov ? own[0].findIndex(v => v < 0) : -1;
     const trs = [];
     for (let r = 0; r < rows; r++) {
       const cells = [];
       for (let c = 0; c < cols;) {
         const si = own[r][c];
-        if (si < 0) { cells.push(new TableCell({ children: [new Paragraph({ children: r === 0 && c === anchorC ? [ov(-c * cw)] : [] })], width: { size: cw, type: WidthType.DXA },
+        if (si < 0) { cells.push(new TableCell({ children: [new Paragraph({ children: r === 0 && c === anchorC ? ov(-c * cw) : [] })], width: { size: cw, type: WidthType.DXA },
           borders: { top: GD, bottom: GD, left: GD, right: GD }, margins: { top: 0, bottom: 0, left: 0, right: 0 } })); c++; continue; }
         const s = ok[si];
         const B = s.border === false ? GD : S2;
@@ -312,7 +351,7 @@ module.exports = function build(cfg) {
     const sc = opt.scale || Math.min((cols - padL - padR) / (maxX - minX), (rows - padT - padB) / (maxY - minY));
     const shapes = [], labels = [];
     const X = v => padL + (v - minX) * sc, Y = v => padT + (v - minY) * sc;
-    const draw = [];
+    const draw = [], legend = {}, rects = {};
     objs.forEach(o => {
       const x = Math.round(X(o.x || 0)), y = Math.round(Y(o.y || 0));
       const w = Math.max(1, Math.round(o.w * sc)), h = Math.max(1, Math.round(o.h * sc));
@@ -334,6 +373,19 @@ module.exports = function build(cfg) {
         draw.push({ kind: "stove", round: !!st.round, x: x + (+String(st.x ?? 0).replace(",", ".")) * kx, y: y + (+String(st.y ?? 0).replace(",", ".")) * ky,
           w: st.round ? Math.min(sw * kx, sw * ky) : sw * kx, h: st.round ? Math.min(sw * kx, sw * ky) : sh * ky });
       });
+      // зоны повреждения штриховкой: hatch: true — весь объект; zones: [{ x, y, w, h }] — м от левого верхнего угла объекта
+      const num = v => +String(v ?? 0).replace(",", ".");
+      if (o.hatch) { draw.push({ kind: "hatch", x, y, w, h, full: true }); legend.hatch = 1; }
+      (o.zones || []).forEach(z => { draw.push({ kind: "hatch", x: x + num(z.x) * kx, y: y + num(z.y) * ky, w: num(z.w) * kx, h: num(z.h) * ky }); legend.hatch = 1; });
+      // отметки: marks: [{ x, y, type: "leak"|"fire", text }] — место протечки / очаг пожара, м от левого верхнего угла объекта
+      (o.marks || []).forEach(m => { const ty = m.type === "fire" ? "fire" : "leak";
+        draw.push({ kind: "mark", type: ty, x: x + num(m.x) * kx, y: y + num(m.y) * ky });
+        (legend[ty] = legend[ty] || []).push(m.text || ""); });
+      rects[o.name] = { x, y, w, h, o };
+      // подложка под название объекта, чтобы штриховка его не перечёркивала (размер подписи — прикидкой по символам)
+      const hitC = z => num(z.x) <= o.w / 2 + 0.6 && num(z.x) + num(z.w) >= o.w / 2 - 0.6 && num(z.y) <= o.h / 2 + 0.4 && num(z.y) + num(z.h) >= o.h / 2 - 0.4;
+      if ((o.hatch || (o.zones || []).some(hitC)) && o.name) { const tw = Math.min(w - 0.2, String(o.name).length * 0.36 + 0.4);
+        draw.push({ kind: "clear", x: x + (w - tw) / 2, y: y + h / 2 - 0.45, w: tw, h: 0.9 }); }
       const label = o.name + (opt.dimsInside !== false && !opt.dimSide ? `\n${fmt(o.w)}×${fmt(o.h)} м` : "");
       shapes.push({ x, y, w, h, text: label, sz: opt.sz || 14 });
       if (opt.dimSide) {
@@ -353,9 +405,41 @@ module.exports = function build(cfg) {
           alt: [{ x: x - 3 - lx, y: my, w: 3, h: 1 }, { x: x + w + rx, y: my, w: 2, h: 1 }, { x: x - 2 - lx, y: my, w: 2, h: 1 }, { x: x + w, y: my, w: 3, h: 1 }] });
       }
     });
+    // расстояния между строениями: gaps: [{ a: "Жилой дом", b: "Баня", m: "6" }] (m не задано — считается по координатам)
+    (opt.gaps || []).forEach(g => {
+      const A = rects[g.a], B = rects[g.b]; if (!A || !B) return;
+      const oa = A.o, ob = B.o, ax0 = oa.x || 0, ay0 = oa.y || 0, bx0 = ob.x || 0, by0 = ob.y || 0;
+      const ovX = Math.min(ax0 + oa.w, bx0 + ob.w) - Math.max(ax0, bx0), ovY = Math.min(ay0 + oa.h, by0 + ob.h) - Math.max(ay0, by0);
+      let p1, p2, dm;
+      if (ovX > 0 && !(ovY > 0)) { // друг над другом
+        const mx = X(Math.max(ax0, bx0) + ovX / 2), up = ay0 < by0 ? A : B, dn = up === A ? B : A;
+        p1 = [mx, up.y + up.h]; p2 = [mx, dn.y]; dm = Math.abs((ay0 < by0 ? by0 - ay0 - oa.h : ay0 - by0 - ob.h));
+      } else if (ovY > 0 && !(ovX > 0)) { // рядом по горизонтали
+        const my = Y(Math.max(ay0, by0) + ovY / 2), lf = ax0 < bx0 ? A : B, rt = lf === A ? B : A;
+        p1 = [lf.x + lf.w, my]; p2 = [rt.x, my]; dm = Math.abs(ax0 < bx0 ? bx0 - ax0 - oa.w : ax0 - bx0 - ob.w);
+      } else { // наискосок — между ближайшими углами
+        const cx = (r, o, other) => (o.x || 0) + o.w <= (other.x || 0) ? r.x + r.w : r.x;
+        const cy = (r, o, other) => (o.y || 0) + o.h <= (other.y || 0) ? r.y + r.h : r.y;
+        p1 = [cx(A, oa, ob), cy(A, oa, ob)]; p2 = [cx(B, ob, oa), cy(B, ob, oa)];
+        const dx = Math.max(0, bx0 - ax0 - oa.w, ax0 - bx0 - ob.w), dy = Math.max(0, by0 - ay0 - oa.h, ay0 - by0 - ob.h); dm = Math.hypot(dx, dy);
+      }
+      draw.push({ kind: "dim", p1, p2 });
+      const txt = `${g.m !== undefined ? String(g.m).replace(".", ",") : fmt(dm)} м`;
+      const mx = (p1[0] + p2[0]) / 2, my = (p1[1] + p2[1]) / 2, vert = Math.abs(p2[1] - p1[1]) > Math.abs(p2[0] - p1[0]);
+      labels.push(vert ? { x: Math.round(mx) + 1, y: Math.floor(my), w: 3, h: 1, text: txt, border: false, sz: 14, alt: [{ x: Math.round(mx) - 4, y: Math.floor(my), w: 3, h: 1 }] }
+                       : { x: Math.round(mx) - 1, y: Math.floor(my) - 1, w: 3, h: 1, text: txt, border: false, sz: 14, alt: [{ x: Math.round(mx) - 1, y: Math.floor(my) + 1, w: 3, h: 1 }] });
+    });
+    if (opt.north) draw.push({ kind: "north", x: cols - 1.5, y: 0.15 });
     shapes.push(...labels);
     (opt.extra || []).forEach(e => shapes.push({ x: Math.round(X(e.x)), y: Math.round(Y(e.y)), w: Math.max(1, Math.round((e.w || 4) * sc)), h: 1, text: e.text, border: false, sz: 14 }));
     shapes.draw = draw;
+    // условные обозначения под схемой — только то, что реально нарисовано
+    const lg = [];
+    if (legend.hatch) lg.push("штриховка — зона повреждения");
+    const lt = arr => arr.filter(Boolean).length ? ` (${arr.filter(Boolean).join("; ")})` : "";
+    if (legend.leak) lg.push("⊙ — место протечки" + lt(legend.leak));
+    if (legend.fire) lg.push("⊗ — очаг пожара" + lt(legend.fire));
+    shapes.legend = lg.length ? "Обозначения: " + lg.join("; ") : "";
     return shapes;
   }
 
@@ -504,10 +588,11 @@ module.exports = function build(cfg) {
   // =================== ОБЩАЯ СХЕМА ===================
   if (D.scheme) {
     const W = PORT_W, cols = 40, cw = Math.floor(W / cols), rows = 54, rh = cw;
-    const shapes = D.scheme.shapes || placeObjects(D.scheme.objects, cols, rows, { dimSide: true, extra: D.scheme.labels, sz: 15 });
+    const shapes = D.scheme.shapes || placeObjects(D.scheme.objects, cols, rows, { dimSide: true, extra: D.scheme.labels, sz: 15, gaps: D.scheme.gaps, north: D.scheme.north });
     sections.push({ properties: portProps, children: [
       P(t("ОБЩАЯ СХЕМА МЕСТА ОСМОТРА", { b: true, sz: 24 }), { a: R, after: 120 }),
       grid(cols, rows, cw, rh, shapes),
+      ...(shapes.legend ? [P(t(shapes.legend, { b: true, sz: 18 }), { before: 60 })] : []),
       ...(D.scheme.note ? [P(t(D.scheme.note, { b: true, sz: 20 }), { before: 80 })] : []),
       P(t(""), { after: 120 }), signBlock(W),
     ] });
@@ -622,11 +707,13 @@ module.exports = function build(cfg) {
     else {
       const objs = rm.plan && rm.plan.objects ? rm.plan.objects : (() => {
         const m = String(rm.size || "").replace(/,/g, ".").split(/[*xх×]/).map(Number);
-        return m[0] && m[1] ? [{ name: rm.name, x: 0, y: 0, w: m[0], h: m[1], openings: rm.plan && rm.plan.openings, stoves: rm.plan && rm.plan.stoves }] : [];
+        return m[0] && m[1] ? [{ name: rm.name, x: 0, y: 0, w: m[0], h: m[1], openings: rm.plan && rm.plan.openings, stoves: rm.plan && rm.plan.stoves,
+          zones: rm.plan && rm.plan.zones, marks: rm.plan && rm.plan.marks, hatch: rm.plan && rm.plan.hatch }] : [];
       })();
       pshapes = placeObjects(objs, gc, grows, { dimSide: true, sz: 14 });
     }
     const planT = [P(t("План-схема помещения", { b: true, sz: 20 }), { a: R, after: 40 }), grid(gc, grows, gcw, grh, pshapes),
+      ...(pshapes.legend ? [P(t(pshapes.legend, { sz: 13 }), { line: 200 })] : []),
       P(t("(при сложной конфигурации помещения на схеме так же должны быть отмечены длины стен)", { i: true, sz: 15 }), { a: R })];
     const top = table([iw[0] + iw[1], gapW, planW], [row([
       cell([infoT], { w: iw[0] + iw[1], bd: NONE, va: VerticalAlign.TOP, m: { top: 0, bottom: 0, left: 0, right: 0 } }),
@@ -647,7 +734,7 @@ module.exports = function build(cfg) {
     const er = elementRows(cols, items, 3, 2, 0, 205).map(x => row(x.cells, { h: x.h }));
     sections.push({ properties: landProps, children: [
       P(t("ВНУТРЕННЯЯ ОТДЕЛКА И ИНЖЕНЕРНОЕ ОБОРУДОВАНИЕ", { b: true, sz: 22 }), { a: R }),
-      top, P(t(""), { after: 80 }), table(cols, [hdr, ...er]), P(t(""), { after: 40 }), signBlock(W),
+      top, P(t(""), { after: pshapes.legend ? 0 : 80, line: pshapes.legend ? 120 : 240 }), table(cols, [hdr, ...er]), P(t(""), { after: 40 }), signBlock(W),
     ] });
   });
 
