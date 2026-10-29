@@ -17,6 +17,12 @@ const fs = require('fs');
 //   D.flat        → «КВАРТИРА» (опционально, по умолчанию не выводится)
 //   D.items[] / D.itemsTotal → «ДОМАШНЕЕ и/или другое ИМУЩЕСТВО»
 //   D.rooms[]     → «ВНУТРЕННЯЯ ОТДЕЛКА И ИНЖЕНЕРНОЕ ОБОРУДОВАНИЕ», по листу на помещение
+//
+// Значки на схемах (общая схема и план помещения), у любого объекта в scheme.objects / plan.objects:
+//   openings: [{ type: "window"|"door", wall: "top"|"bottom"|"left"|"right", from: 0.5, w: 1.2,
+//                open: "in"|"out", hinge: "start"|"end" }]   — from: м от левого (верх/низ) или верхнего (лев/прав) угла
+//   stoves:   [{ x: 0.3, y: 0.3, w: 1, h: 1 }] или { x, y, w: 0.7, round: true } — м от левого верхнего угла объекта
+// Для плана помещения без plan.objects (рисуется по rm.size) — rm.plan = { openings: [...], stoves: [...] }.
 module.exports = function build(cfg) {
   const { D, SIGN_EXPERT, EXPERT, SIG_RLE, OUT_FILE } = cfg;
 
@@ -158,6 +164,100 @@ module.exports = function build(cfg) {
     return out;
   }
 
+  // ---------- значки на плане: окна, двери, печи ----------
+  // PNG с прозрачным фоном, рисуется без внешних библиотек; items — в клетках сетки (см. placeObjects)
+  function pngRGBA(W, H, px) {
+    const zlib = require('zlib');
+    const raw = Buffer.alloc((W * 4 + 1) * H);
+    for (let y = 0; y < H; y++) px.copy(raw, y * (W * 4 + 1) + 1, y * W * 4, (y + 1) * W * 4);
+    const T = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; T[n] = c >>> 0; }
+    const crc = b => { let c = 0xffffffff; for (const x of b) c = T[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+    const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+    const ih = Buffer.alloc(13); ih.writeUInt32BE(W, 0); ih.writeUInt32BE(H, 4); ih[8] = 8; ih[9] = 6;
+    return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', ih), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
+  }
+  function overlay(items, cols, rows, cw, rh) {
+    const K = 0.2; // пикселей на twip (≈3x от 96 dpi)
+    const W = Math.ceil(cols * cw * K), H = Math.ceil(rows * rh * K);
+    const px = Buffer.alloc(W * H * 4);
+    const cx = v => v * cw * K, cy = v => v * rh * K;
+    const SS = 3; // сглаживание: 3×3 подвыборки на пиксель
+    // заливка многоугольника (even-odd) с подвыборкой, цвет [r,g,b]
+    function fill(poly, col) {
+      const ys = poly.map(p => p[1]), xs = poly.map(p => p[0]);
+      const y0 = Math.max(0, Math.floor(Math.min(...ys))), y1 = Math.min(H - 1, Math.ceil(Math.max(...ys)));
+      const x0 = Math.max(0, Math.floor(Math.min(...xs))), x1 = Math.min(W - 1, Math.ceil(Math.max(...xs)));
+      if (x1 < x0 || y1 < y0) return;
+      const cov = new Float32Array((x1 - x0 + 1) * (y1 - y0 + 1));
+      for (let y = y0; y <= y1; y++) for (let sy = 0; sy < SS; sy++) {
+        const Y = y + (sy + 0.5) / SS, xi = [];
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          const [ax, ay] = poly[i], [bx, by] = poly[j];
+          if ((ay > Y) !== (by > Y)) xi.push(ax + (Y - ay) * (bx - ax) / (by - ay));
+        }
+        xi.sort((a, b) => a - b);
+        for (let k = 0; k + 1 < xi.length; k += 2)
+          for (let x = Math.max(x0, Math.floor(xi[k])); x <= Math.min(x1, Math.floor(xi[k + 1])); x++)
+            for (let sx = 0; sx < SS; sx++) { const X = x + (sx + 0.5) / SS; if (X >= xi[k] && X < xi[k + 1]) cov[(y - y0) * (x1 - x0 + 1) + x - x0] += 1 / (SS * SS); }
+      }
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+        const a = cov[(y - y0) * (x1 - x0 + 1) + x - x0]; if (a <= 0) continue;
+        const o = (y * W + x) * 4, A = px[o + 3] / 255, na = a + A * (1 - a);
+        for (let c = 0; c < 3; c++) px[o + c] = Math.round((col[c] * a + px[o + c] * A * (1 - a)) / na);
+        px[o + 3] = Math.round(na * 255);
+      }
+    }
+    const BLK = [0, 0, 0], WHT = [255, 255, 255];
+    const line = (a, b, w, col = BLK) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, nx = -dy / L * w / 2, ny = dx / L * w / 2;
+      const ex = dx / L * w / 2, ey = dy / L * w / 2; // концы с выносом на полтолщины — без «щелей» в углах
+      fill([[a[0] - ex + nx, a[1] - ey + ny], [b[0] + ex + nx, b[1] + ey + ny], [b[0] + ex - nx, b[1] + ey - ny], [a[0] - ex - nx, a[1] - ey - ny]], col); };
+    const rect = (p, u, n, len, th) => [[p[0] - n[0] * th, p[1] - n[1] * th], [p[0] + u[0] * len - n[0] * th, p[1] + u[1] * len - n[1] * th],
+      [p[0] + u[0] * len + n[0] * th, p[1] + u[1] * len + n[1] * th], [p[0] + n[0] * th, p[1] + n[1] * th]];
+    const unit = Math.min(cw, rh) * K;          // размер клетки в пикселях
+    const LW = Math.max(3, 25 * K);             // толщина линии ≈ рамка стены (1,25 pt)
+    const TH = Math.max(LW * 1.8, unit * 0.2);    // полутолщина значка окна поперёк стены
+    items.forEach(it => {
+      if (it.kind === "window" || it.kind === "door") {
+        const a = [cx(it.p1[0]), cy(it.p1[1])], b = [cx(it.p2[0]), cy(it.p2[1])];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]); if (len < 1) return;
+        const u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len], n = it.n; // n — нормаль внутрь объекта
+        if (it.kind === "window") {
+          fill(rect(a, u, n, len, TH), WHT);
+          const o = rect(a, u, n, len, TH); o.forEach((p, i) => line(p, o[(i + 1) % 4], LW * 0.8));
+          line(a, b, LW * 0.6);
+        } else {
+          fill(rect(a, u, n, len, LW * 1.6), WHT);               // разрыв в стене
+          line([a[0] - n[0] * TH * 0.7, a[1] - n[1] * TH * 0.7], [a[0] + n[0] * TH * 0.7, a[1] + n[1] * TH * 0.7], LW); // откосы
+          line([b[0] - n[0] * TH * 0.7, b[1] - n[1] * TH * 0.7], [b[0] + n[0] * TH * 0.7, b[1] + n[1] * TH * 0.7], LW);
+          const hinge = it.hinge === "end" ? b : a, d = it.hinge === "end" ? [-u[0], -u[1]] : u;
+          const s = it.open === "out" ? -1 : 1, ang = 60 * Math.PI / 180;
+          const leaf = [hinge[0] + len * (Math.cos(ang) * d[0] + Math.sin(ang) * n[0] * s), hinge[1] + len * (Math.cos(ang) * d[1] + Math.sin(ang) * n[1] * s)];
+          line(hinge, leaf, LW * 0.8);                             // полотно открыто под углом
+        }
+      } else if (it.kind === "stove") {
+        const x0 = cx(it.x), y0 = cy(it.y), x1 = cx(it.x + it.w), y1 = cy(it.y + it.h);
+        if (it.round) {
+          const r = Math.min(x1 - x0, y1 - y0) / 2, mx = (x0 + x1) / 2, my = (y0 + y1) / 2, N = 64;
+          const pt = k => [mx + r * Math.cos(k), my + r * Math.sin(k)];
+          fill(Array.from({ length: N / 2 + 1 }, (_, i) => pt(-Math.PI / 4 + Math.PI * i / (N / 2))), BLK); // закрашенная половина
+          for (let i = 0; i < N; i++) line(pt(2 * Math.PI * i / N), pt(2 * Math.PI * (i + 1) / N), LW * 0.8);
+          line(pt(-Math.PI / 4), pt(3 * Math.PI / 4), LW * 0.8);
+        } else {
+          fill([[x0, y0], [x1, y0], [x1, y1]], BLK); // половина закрашена
+          [[x0, y0, x1, y0], [x1, y0, x1, y1], [x1, y1, x0, y1], [x0, y1, x0, y0], [x0, y0, x1, y1]].forEach(([a, b, c, d]) => line([a, b], [c, d], LW * 0.8));
+        }
+      }
+    });
+    const png = pngRGBA(W, H, px);
+    const wPt = cols * cw / 15, hPt = rows * rh / 15; // twip → пиксели 96 dpi
+    return (offX) => new ImageRun({ type: "png", data: png, transformation: { width: wPt, height: hPt },
+      floating: {
+        horizontalPosition: { relative: HorizontalPositionRelativeFrom.CHARACTER, offset: Math.round(offX * 635) },
+        verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: 0 },
+        wrap: { type: TextWrappingType.NONE }, allowOverlap: true, layoutInCell: true, zIndex: 5,
+      } });
+  }
+
   // ---------- сетка со схемой (общая схема / план помещения) ----------
   // shapes: {x,y,w,h, text, border:true|false, sz, b} в клетках
   function grid(cols, rows, cw, rh, shapes) {
@@ -173,12 +273,15 @@ module.exports = function build(cfg) {
         ok[si] = { ...s0, x, y, w, h }; return;
       }
     });
+    // значки (окна, двери, печи) — прозрачная картинка поверх сетки, якорь в первой пустой клетке верхнего ряда
+    const ov = shapes.draw && shapes.draw.length ? overlay(shapes.draw, cols, rows, cw, rh) : null;
+    const anchorC = ov ? own[0].findIndex(v => v < 0) : -1;
     const trs = [];
     for (let r = 0; r < rows; r++) {
       const cells = [];
       for (let c = 0; c < cols;) {
         const si = own[r][c];
-        if (si < 0) { cells.push(new TableCell({ children: [new Paragraph({ children: [] })], width: { size: cw, type: WidthType.DXA },
+        if (si < 0) { cells.push(new TableCell({ children: [new Paragraph({ children: r === 0 && c === anchorC ? [ov(-c * cw)] : [] })], width: { size: cw, type: WidthType.DXA },
           borders: { top: GD, bottom: GD, left: GD, right: GD }, margins: { top: 0, bottom: 0, left: 0, right: 0 } })); c++; continue; }
         const s = ok[si];
         const B = s.border === false ? GD : S2;
@@ -205,24 +308,54 @@ module.exports = function build(cfg) {
     const all = [...objs, ...(opt.extra || []).map(e => ({ x: e.x, y: e.y, w: e.w || 4, h: 0.5 }))];
     const minX = Math.min(...all.map(o => o.x || 0)), minY = Math.min(...all.map(o => o.y || 0));
     const maxX = Math.max(...all.map(o => (o.x || 0) + o.w)), maxY = Math.max(...all.map(o => (o.y || 0) + o.h));
-    const padL = 1, padT = 2, padR = opt.dimSide ? 4 : 1, padB = 1;
+    const padL = opt.dimSide ? 3 : 1, padT = 2, padR = opt.dimSide ? 4 : 1, padB = 1; // слева запас под подпись высоты, если справа занято
     const sc = opt.scale || Math.min((cols - padL - padR) / (maxX - minX), (rows - padT - padB) / (maxY - minY));
     const shapes = [], labels = [];
     const X = v => padL + (v - minX) * sc, Y = v => padT + (v - minY) * sc;
+    const draw = [];
     objs.forEach(o => {
       const x = Math.round(X(o.x || 0)), y = Math.round(Y(o.y || 0));
       const w = Math.max(1, Math.round(o.w * sc)), h = Math.max(1, Math.round(o.h * sc));
+      // проёмы: { type: "window"|"door", wall: "top"|"bottom"|"left"|"right", from: м от левого/верхнего угла, w: ширина, м,
+      //           open: "in"|"out" (дверь, по умолч. внутрь), hinge: "start"|"end" (петли у начала или конца проёма) }
+      const kx = w / o.w, ky = h / o.h;
+      (o.openings || []).forEach(op => {
+        const f = +String(op.from ?? 0).replace(",", "."), ow = +String(op.w ?? 0.9).replace(",", ".");
+        const wall = op.wall || "bottom", horiz = wall === "top" || wall === "bottom";
+        const at = horiz ? (wall === "top" ? y : y + h) : (wall === "left" ? x : x + w);
+        const s0 = horiz ? x + f * kx : y + f * ky, s1 = horiz ? x + Math.min(o.w, f + ow) * kx : y + Math.min(o.h, f + ow) * ky;
+        draw.push({ kind: op.type === "door" ? "door" : "window", open: op.open, hinge: op.hinge,
+          p1: horiz ? [s0, at] : [at, s0], p2: horiz ? [s1, at] : [at, s1],
+          n: { top: [0, 1], bottom: [0, -1], left: [1, 0], right: [-1, 0] }[wall] });
+      });
+      // печи: { x, y, w, h } в м от левого верхнего угла объекта; round: true — круглая (диаметр = w)
+      (o.stoves || []).forEach(st => {
+        const sw = +String(st.w ?? 1).replace(",", "."), sh = st.round ? sw : +String(st.h ?? sw).replace(",", ".");
+        draw.push({ kind: "stove", round: !!st.round, x: x + (+String(st.x ?? 0).replace(",", ".")) * kx, y: y + (+String(st.y ?? 0).replace(",", ".")) * ky,
+          w: st.round ? Math.min(sw * kx, sw * ky) : sw * kx, h: st.round ? Math.min(sw * kx, sw * ky) : sh * ky });
+      });
       const label = o.name + (opt.dimsInside !== false && !opt.dimSide ? `\n${fmt(o.w)}×${fmt(o.h)} м` : "");
       shapes.push({ x, y, w, h, text: label, sz: opt.sz || 14 });
       if (opt.dimSide) {
-        const my = y + Math.floor((h - 1) / 2);
-        labels.push({ x, y: y - 1, w, h: 1, text: `${fmt(o.w)} м`, border: false, sz: 14, alt: [{ x, y: y + h, w, h: 1 }] });
-        labels.push({ x: x + w, y: my, w: 3, h: 1, text: `${fmt(o.h)} м`, border: false, sz: 14,
-          alt: [{ x: x - 3, y: my, w: 3, h: 1 }, { x: x + w, y: my, w: 2, h: 1 }, { x: x - 2, y: my, w: 2, h: 1 }] });
+        // строка для подписи высоты: ближе к середине, но мимо проёмов на боковых стенах
+        const sideSpans = (o.openings || []).filter(op => op.wall === "left" || op.wall === "right").map(op => {
+          const f = +String(op.from ?? 0).replace(",", ".") * ky, ow = +String(op.w ?? 0.9).replace(",", ".") * ky;
+          return [y + f - (op.type === "door" ? ow * 0.6 : 0.3), y + f + ow + (op.type === "door" ? ow * 0.6 : 0.3)]; });
+        const mid = y + Math.floor((h - 1) / 2), rowsBy = [mid];
+        for (let d = 1; d < h; d++) rowsBy.push(mid - d, mid + d);
+        const my = rowsBy.find(r => r >= y && r < y + h && !sideSpans.some(([a, b]) => r + 1 > a && r < b)) ?? mid;
+        // подпись длины не должна налезать на значки на стене — сдвиг на клетку дальше
+        const busy = side => (o.openings || []).some(op => (op.wall || "bottom") === side);
+        const ty = busy("top") ? 2 : 1, by = busy("bottom") ? 1 : 0;
+        labels.push({ x, y: y - ty, w, h: 1, text: `${fmt(o.w)} м`, border: false, sz: 14, alt: [{ x, y: y + h + by, w, h: 1 }, { x, y: y - 1, w, h: 1 }] });
+        const rx = busy("right") ? 1 : 0, lx = busy("left") ? 1 : 0;
+        labels.push({ x: x + w + rx, y: my, w: 3, h: 1, text: `${fmt(o.h)} м`, border: false, sz: 14,
+          alt: [{ x: x - 3 - lx, y: my, w: 3, h: 1 }, { x: x + w + rx, y: my, w: 2, h: 1 }, { x: x - 2 - lx, y: my, w: 2, h: 1 }, { x: x + w, y: my, w: 3, h: 1 }] });
       }
     });
     shapes.push(...labels);
     (opt.extra || []).forEach(e => shapes.push({ x: Math.round(X(e.x)), y: Math.round(Y(e.y)), w: Math.max(1, Math.round((e.w || 4) * sc)), h: 1, text: e.text, border: false, sz: 14 }));
+    shapes.draw = draw;
     return shapes;
   }
 
@@ -489,7 +622,7 @@ module.exports = function build(cfg) {
     else {
       const objs = rm.plan && rm.plan.objects ? rm.plan.objects : (() => {
         const m = String(rm.size || "").replace(/,/g, ".").split(/[*xх×]/).map(Number);
-        return m[0] && m[1] ? [{ name: rm.name, x: 0, y: 0, w: m[0], h: m[1] }] : [];
+        return m[0] && m[1] ? [{ name: rm.name, x: 0, y: 0, w: m[0], h: m[1], openings: rm.plan && rm.plan.openings, stoves: rm.plan && rm.plan.stoves }] : [];
       })();
       pshapes = placeObjects(objs, gc, grows, { dimSide: true, sz: 14 });
     }
