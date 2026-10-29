@@ -19,7 +19,7 @@ const fs = require('fs');
 //   D.rooms[]     → «ВНУТРЕННЯЯ ОТДЕЛКА И ИНЖЕНЕРНОЕ ОБОРУДОВАНИЕ», по листу на помещение
 //
 // Значки на схемах (общая схема и план помещения), у любого объекта в scheme.objects / plan.objects:
-//   openings: [{ type: "window"|"door", wall: "top"|"bottom"|"left"|"right", from: 0.5, w: 1.2,
+//   openings: [{ type: "window"|"door"|"arch" (проём без полотна), wall: "top"|"bottom"|"left"|"right", from: 0.5, w: 1.2,
 //                open: "in"|"out", hinge: "start"|"end" }]   — from: м от левого (верх/низ) или верхнего (лев/прав) угла
 //   stoves:   [{ x: 0.3, y: 0.3, w: 1, h: 1 }] или { x, y, w: 0.7, round: true } — м от левого верхнего угла объекта
 //   hatch: true — весь объект заштрихован (сгорел/разрушен); zones: [{ x, y, w, h }] — зоны повреждения штриховкой
@@ -236,7 +236,7 @@ module.exports = function build(cfg) {
           const hinge = it.hinge === "end" ? b : a, d = it.hinge === "end" ? [-u[0], -u[1]] : u;
           const s = it.open === "out" ? -1 : 1, ang = 60 * Math.PI / 180;
           const leaf = [hinge[0] + len * (Math.cos(ang) * d[0] + Math.sin(ang) * n[0] * s), hinge[1] + len * (Math.cos(ang) * d[1] + Math.sin(ang) * n[1] * s)];
-          line(hinge, leaf, LW * 0.8);                             // полотно открыто под углом
+          if (it.leaf !== false) line(hinge, leaf, LW * 0.8);       // полотно открыто под углом (у проёма-арки нет)
         }
       } else if (it.kind === "hatch") {
         const x0 = cx(it.x), y0 = cy(it.y), x1 = cx(it.x + it.w), y1 = cy(it.y + it.h), sp = unit * (it.full ? 0.45 : 0.32);
@@ -363,7 +363,7 @@ module.exports = function build(cfg) {
         const wall = op.wall || "bottom", horiz = wall === "top" || wall === "bottom";
         const at = horiz ? (wall === "top" ? y : y + h) : (wall === "left" ? x : x + w);
         const s0 = horiz ? x + f * kx : y + f * ky, s1 = horiz ? x + Math.min(o.w, f + ow) * kx : y + Math.min(o.h, f + ow) * ky;
-        draw.push({ kind: op.type === "door" ? "door" : "window", open: op.open, hinge: op.hinge,
+        draw.push({ kind: op.type === "door" || op.type === "arch" ? "door" : "window", open: op.open, hinge: op.hinge, leaf: op.type !== "arch",
           p1: horiz ? [s0, at] : [at, s0], p2: horiz ? [s1, at] : [at, s1],
           n: { top: [0, 1], bottom: [0, -1], left: [1, 0], right: [-1, 0] }[wall] });
       });
