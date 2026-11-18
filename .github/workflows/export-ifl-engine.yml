@@ -1,0 +1,20 @@
+name: Export current IFL engine
+on:
+  push:
+    paths:
+      - '.github/workflows/export-ifl-engine.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record version
+        run: git hash-object imush_engine.js && wc -c imush_engine.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IFL-current-imush-engine
+          path: imush_engine.js
+          retention-days: 7
