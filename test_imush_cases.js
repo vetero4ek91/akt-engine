@@ -51,7 +51,7 @@ const testCases = {
       ],
       gaps:[{a:'Жилой дом',b:'Баня',m:3}]},
     buildings:[{type:'Жилой дом',purpose:'Жилое',doors:'2',windows:'4',
-      size:'8 × 6 × 3',year:'2005',repairYear:'2021',
+      size:'8 × 6 × 3',year:'2005',repairYear:'2021',material:'Деревянный, бревенчатые стены',
       p8:'partial',
       el:{steny:{mat:'Дерево',dmg:[['ТЕСТ: следы термического воздействия','3 м²']]},
           perekr:{mat:'Дерево',dmg:[['ТЕСТ: локальное повреждение потолочного перекрытия','2 м²']]}}}]
@@ -63,12 +63,18 @@ const testCases = {
       openings:[{type:'door',wall:'bottom',from:2,w:0.9}],
       marks:[{x:3,y:2,type:'fire',text:'очаг'}]}]},
     buildings:[{type:'Сарай',purpose:'Хозяйственное',doors:'1',windows:'0',
-      size:'6 × 4 × 2,5',year:'2012',repairYear:'—',total:true}]
+      size:'6 × 4 × 2,5',year:'2012',repairYear:'—',material:'Деревянный каркас, дощатая обшивка',total:true}]
   }
 };
 if(!Object.hasOwn(testCases,kind)) throw new Error('Допустимые сценарии: zaliv, pozhar, total');
 const D=testCases[kind];
-// Подпись отключена в тестовом примере, чтобы не хранить факсимиле в публичном репозитории.
-build({D,EXPERT:'Андреев А.Г.',SIGN_EXPERT:false,
+// Только условный росчерк для проверки механизма подписи; НЕ факсимиле эксперта!
+// В настоящем акте передавать SIG_RLE из закрытого podpis.js или SIG_PNG_FILE.
+const testMark = Array.from({length:40}, (_,i) => {
+  const a = (10 + (i % 25)).toString(36).padStart(2, '0');
+  const b = (120 - Math.floor(i / 3)).toString(36).padStart(2, '0');
+  return a + '04' + b + '03';
+}).join(',');
+build({D,EXPERT:'Андреев А.Г.',SIGN_EXPERT:true,SIG_RLE:testMark,
   OUT_FILE:path.resolve(process.cwd(), 'TEST_IFL_'+kind+'.docx')
 }).catch(e=>{console.error(e);process.exitCode=1});
