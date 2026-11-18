@@ -132,7 +132,8 @@ module.exports = function build(cfg) {
     const gray = (x) => t(x, { i: true, sz: 16, color: "808080" });
     const sigP = SIG_ON ? P([sigImg()], { a: C }) : P(gray("подпись"), { a: C });
     const part = D.participant || {};
-    return table([lw, fw, sw, dw], [
+    // Две строки подписей держим как единый блок: одна не должна уехать на отдельный лист.
+    const signatures = table([lw, fw, sw, dw], [
       row([cell(P(t("Осмотр произвел", { b: true, sz: 22 })), { w: lw, fill: GREEN }),
            cell(P(EXPERT ? t(EXPERT, { b: true, sz: 20 }) : gray("ФАМИЛИЯ ИМЯ ОТЧЕСТВО"), { a: C }), { w: fw }),
            cell(sigP, { w: sw }),
@@ -142,6 +143,9 @@ module.exports = function build(cfg) {
            cell(P(OWNER_NOTE ? t(OWNER_NOTE, { sz: 14, b: true }) : gray("подпись"), { a: C }), { w: sw }),
            cell(P(D.date ? t(D.date, { sz: 20 }) : gray("дата"), { a: C }), { w: dw })], { h: 400 }),
     ]);
+    // Обе подписи внутри одной неделимой строки внешней таблицы.
+    return table([totalW], [row([cell([signatures], { w: totalW, bd: NONE,
+      m: { top: 0, bottom: 0, left: 0, right: 0 } })])], { borders: NONE });
   }
 
   // таблица «элемент → несколько строк с точечными разделителями»
@@ -587,7 +591,8 @@ module.exports = function build(cfg) {
 
   // =================== ОБЩАЯ СХЕМА ===================
   if (D.scheme) {
-    const W = PORT_W, cols = 40, cw = Math.floor(W / cols), rows = 54, rh = cw;
+    // 46 строк вместо 54: убраны пустые нижние клетки, подписи помещаются на листе со схемой.
+    const W = PORT_W, cols = 40, cw = Math.floor(W / cols), rows = 46, rh = cw;
     const shapes = D.scheme.shapes || placeObjects(D.scheme.objects, cols, rows, { dimSide: true, extra: D.scheme.labels, sz: 15, gaps: D.scheme.gaps, north: D.scheme.north });
     sections.push({ properties: portProps, children: [
       P(t("ОБЩАЯ СХЕМА МЕСТА ОСМОТРА", { b: true, sz: 24 }), { a: R, after: 120 }),
