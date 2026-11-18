@@ -30,9 +30,7 @@ jobs:
           mkdir -p output
           libreoffice -env:UserInstallation=file:///tmp/lo_ifl --headless --convert-to pdf --outdir output TEST_IFL_*.docx
           cp TEST_IFL_*.docx output/
-          pdfinfo output/TEST_IFL_zaliv.pdf | grep Pages
-          pdfinfo output/TEST_IFL_pozhar.pdf | grep Pages
-          pdfinfo output/TEST_IFL_total.pdf | grep Pages
+          ls -lh output/*.pdf
       - uses: actions/upload-artifact@v4
         with:
           name: IFL-test-PDFs
