@@ -1,0 +1,39 @@
+name: IFL form smoke tests
+on:
+  push:
+    paths:
+      - '.github/workflows/ifl-tests.yml'
+      - 'imush_engine.js'
+      - 'test_imush_cases.js'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install DOCX and LibreOffice
+        run: |
+          npm install --no-save --no-package-lock docx
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libreoffice-writer
+      - name: Generate all 3 test documents
+        run: |
+          node test_imush_cases.js zaliv
+          node test_imush_cases.js pozhar
+          node test_imush_cases.js total
+          mkdir -p output
+          libreoffice -env:UserInstallation=file:///tmp/lo_ifl --headless --convert-to pdf --outdir output TEST_IFL_*.docx
+          cp TEST_IFL_*.docx output/
+          pdfinfo output/TEST_IFL_zaliv.pdf | grep Pages
+          pdfinfo output/TEST_IFL_pozhar.pdf | grep Pages
+          pdfinfo output/TEST_IFL_total.pdf | grep Pages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IFL-test-PDFs
+          path: output/
