@@ -42,7 +42,22 @@ def has_checked(text, label, selected):
     return re.search(re.escape(mark) + r"\s*" + re.escape(label), text, re.I) is not None
 
 
-def check_pdf(path, claim, vin, damages, expected_count=None, checks=None):
+def check_pair(text, heading, expected, max_lookahead=650):
+    idx = text.find(heading)
+    if idx < 0:
+        return False
+    match = re.search(r"([☒☐])\s*Да\s*([☒☐])\s*Нет", text[idx:idx+max_lookahead])
+    if not match:
+        return False
+    yes, no = match.groups()
+    if expected is True:
+        return yes == "☒" and no == "☐"
+    if expected is False:
+        return yes == "☐" and no == "☒"
+    return yes == "☐" and no == "☐"
+
+
+def check_pdf(path, claim, vin, damages, expected_count=None, checks=None, data_fields=None):
     import fitz
     pdf = fitz.open(path)
     if len(pdf) < 4:
@@ -98,6 +113,27 @@ def check_pdf(path, claim, vin, damages, expected_count=None, checks=None):
         for page_idx, label, selected in mapped:
             if not has_checked(pages[page_idx], label, selected):
                 faults.append(f"галочка листа {page_idx+1}: {label} (ожидалось {selected})")
+        pair_states = [
+            (0, "Идентификационные характеристики", checks.get("vinOk")),
+            (0, "Дополнительное оборудование", checks.get("extraEquip")),
+            (2, "Осмотр проводился с проведением демонтажных работ", checks.get("dismantling")),
+            (3, "Характер описанных повреждений", checks.get("match")),
+            (3, "Скрытые повреждения, возможно наличие", checks.get("hidden")),
+        ]
+        if data_fields is not None:
+            pair_states += [
+                (1, "Дефекты эксплуатации транспортного средства", True if data_fields.get("defects") else None),
+                (1, "Повреждения, находящиеся в зоне аварийных", True if data_fields.get("uncertainDamages") else None),
+            ]
+        for page_idx, label, state in pair_states:
+            if not check_pair(pages[page_idx], label, state):
+                faults.append(f"отметки Да/Нет на листе {page_idx+1}: {label}, ожидалось {state}")
+        repairable = checks.get("repairable")
+        if repairable is not None:
+            if not has_checked(pages[3], "ТС подлежит ремонту", repairable):
+                faults.append("неверно отмечено: ТС подлежит ремонту")
+            if not has_checked(pages[3], "ТС не подлежит ремонту", not repairable):
+                faults.append("неверно отмечено: ТС не подлежит ремонту")
     if faults:
         raise RuntimeError("PDF не прошёл проверку: " + "; ".join(faults))
     return len(pdf)
@@ -140,6 +176,8 @@ def main():
         ap.error("Реальный акт: обязателен --approved-damages с согласованным перечнем")
     if not args.test and data["SIGN_EXPERT"] is not True:
         ap.error("В рабочем акте отключено факсимиле эксперта")
+    if data["CHECKS"].get("dismantling") is True:
+        ap.error("Текущий автономный JS всегда ставит 'Нет' для демонтажа; акт с демонтажом блокирован")
     for name in args.damage:
         if norm(name) not in {norm(n) for n in names}:
             ap.error(f"Переданное повреждение отсутствует в JS: {name}")
@@ -176,7 +214,7 @@ def main():
         pdf = temp / "act.pdf"
         if not pdf.exists():
             raise RuntimeError("LibreOffice не создал PDF")
-        pages = check_pdf(pdf, claim, vin, data["damages"], expected_count=len(names), checks=data["CHECKS"])
+        pages = check_pdf(pdf, claim, vin, data["damages"], expected_count=len(names), checks=data["CHECKS"], data_fields=data["D"])
         dest = args.output.resolve()
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(pdf, dest)
