@@ -8,7 +8,10 @@ const D = {
  power:'', powerKw:'', volume:'', stsSeries:'', stsNumber:'', owner:'',
  phone:'', proxy:'', eventDate:'', eventPlace:'', state:'', conclusion:'',
  documentsStatus:'неизвестно', identificationDiscrepancies:[], extraEquipment:[],
- defects:[], uncertainDamages:[]
+ defects:[], uncertainDamages:[],
+ // Сторона основного удара: 'left' / 'right' / 'both' / 'undetermined'.
+ // Два независимых фото/ориентира, подтверждающих сторону по ходу движения.
+ impactSide:'undetermined', orientationEvidence:[]
 };
 // Согласованный список повреждений: [{detail:'',description:''}, ...]
 const damages = [];
@@ -36,6 +39,27 @@ if (process.env.AKT_TEST !== '1') {
   if(missing.length)throw new Error('Не заполнены обязательные поля: '+missing.join(', '));
   if(!Array.isArray(damages)||!damages.length)throw new Error('Нет согласованного списка повреждений');
   if(String(D.vin).length!==17)throw new Error('VIN: требуется 17 символов');
+  // Блокирующий контроль стороны: никакой автоматической догадки по ракурсу фотографа.
+  // Проверяется до создания DOCX, включая описания, состояние и заключение.
+  const side=String(D.impactSide||'undetermined').toLowerCase();
+  if(!['left','right','both'].includes(side))
+    throw new Error('Сторона удара не подтверждена: укажи impactSide по ходу движения автомобиля');
+  if(!Array.isArray(D.orientationEvidence)||D.orientationEvidence.filter(x=>String(x||'').trim()).length<2)
+    throw new Error('Сторона удара: нужны минимум два независимых фото/ориентира в orientationEvidence');
+  if(new Set(D.orientationEvidence.map(x=>String(x||'').trim()).filter(Boolean)).size<2)
+    throw new Error('Сторона удара: ориентиры должны быть независимыми');
+  const sideTexts=[...damages.map((d,i)=>({where:'повреждение №'+(i+1),value:String(d.detail||'')+' '+String(d.description||'')})),
+    {where:'состояние ТС',value:String(D.state||'')},{where:'заключение',value:String(D.conclusion||'')}];
+  // В JS кириллица не всегда считается word-character, поэтому используем границы по не-буквам.
+  const hasLeft=t=>/(^|[^А-Яа-яЁё])(?:лев(?:ый|ая|ое|ого|ому|ым|ом|ую|ой|ые|ых|ыми)|слева)(?=$|[^А-Яа-яЁё])/iu.test(t);
+  const hasRight=t=>/(^|[^А-Яа-яЁё])(?:прав(?:ый|ая|ое|ого|ому|ым|ом|ую|ой|ые|ых|ими)|справа)(?=$|[^А-Яа-яЁё])/iu.test(t);
+  for(const item of sideTexts){
+    if(side==='left'&&hasRight(item.value))throw new Error('Противоречие стороне удара (левая): '+item.where);
+    if(side==='right'&&hasLeft(item.value))throw new Error('Противоречие стороне удара (правая): '+item.where);
+  }
+  if(side==='both'&&!sideTexts.some(x=>hasLeft(x.value))||side==='both'&&!sideTexts.some(x=>hasRight(x.value)))
+    throw new Error('Для удара с двух сторон в перечне должны быть подтверждены обе стороны');
+
   if(String(CHECKS.insurance||'').toUpperCase()==='КАСКО' && KASKO_REPAIRS.length!==damages.length)
     throw new Error('КАСКО: число ремонтных воздействий должно совпадать с повреждениями');
 }
