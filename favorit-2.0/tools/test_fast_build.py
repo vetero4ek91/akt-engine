@@ -1,6 +1,9 @@
-"""Regression tests for the expert-review preflight (no Node.js or LibreOffice)."""
+"""Regression tests for expert review and autonomous PDF pagination."""
+from importlib.util import find_spec
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -85,6 +88,78 @@ class ExpertReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "JS preflight"):
                 self.call_main(*flags)
             read_js.assert_called_once_with(self.generator.resolve())
+
+
+
+@unittest.skipUnless(
+    all(shutil.which(name) for name in ("node", "zip", "unzip", "soffice")) and find_spec("fitz"),
+    "PDF pagination tests require Node.js, zip, unzip, LibreOffice and PyMuPDF",
+)
+class PaginationTests(unittest.TestCase):
+    def render_act(self, count):
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        workdir = Path(workspace.name)
+        generator = Path(fast_build.__file__).resolve().parents[1] / "Favorit_AKT_autonomous.js"
+        source = generator.read_text(encoding="utf-8")
+        claim = "2097852"
+        damages = [
+            {
+                "detail": f"Пробная деталь {i:02d}",
+                "description": (
+                    f"Контрольное описание позиции {i:02d}. "
+                    "Деформация в средней части детали с повреждением лакокрасочного покрытия."
+                ),
+            }
+            for i in range(1, count + 1)
+        ]
+        self.assertIn("const damages = [];", source)
+        self.assertIn("claimNo:''", source)
+        source = source.replace("claimNo:''", f"claimNo:'{claim}'", 1)
+        source = source.replace(
+            "const damages = [];",
+            "const damages = " + json.dumps(damages, ensure_ascii=False) + ";",
+            1,
+        )
+        test_generator = workdir / generator.name
+        test_generator.write_text(source, encoding="utf-8")
+        docx = workdir / "act.docx"
+        fast_build.run(["node", str(test_generator)], 25,
+                       env=dict(os.environ, AKT_TEST="1", AKT_OUT=str(docx)))
+        profile = (workdir / "lo-profile").as_uri()
+        fast_build.run(["soffice", f"-env:UserInstallation={profile}", "--headless",
+                        "--convert-to", "pdf", "--outdir", str(workdir), str(docx)], 35)
+        return workdir / "act.pdf", claim, damages
+
+    def test_seventeen_damage_rows_and_conclusion_fit_four_pages(self):
+        import fitz
+
+        pdf, claim, damages = self.render_act(17)
+        self.assertEqual(fast_build.check_pdf(pdf, claim, "", damages, 17), 4)
+        with fitz.open(pdf) as document:
+            for damage in damages:
+                detail = fast_build.norm(damage["detail"])
+                self.assertIn(detail, fast_build.norm(document[2].get_text()))
+                self.assertNotIn(detail, fast_build.norm(document[3].get_text()))
+            document.new_page()
+            extra = pdf.with_name("extra-page.pdf")
+            document.save(extra)
+        with self.assertRaisesRegex(RuntimeError, "5 стр., ожидается 4"):
+            fast_build.check_pdf(extra, claim, "", damages, 17)
+
+    def test_eighteenth_damage_moves_to_continuation_page(self):
+        import fitz
+
+        pdf, claim, damages = self.render_act(18)
+        self.assertEqual(fast_build.check_pdf(pdf, claim, "", damages, 18), 5)
+        with fitz.open(pdf) as document:
+            for damage in damages[:17]:
+                self.assertIn(fast_build.norm(damage["detail"]),
+                              fast_build.norm(document[2].get_text()))
+            eighteenth = fast_build.norm(damages[17]["detail"])
+            self.assertNotIn(eighteenth, fast_build.norm(document[2].get_text()))
+            self.assertIn(eighteenth, fast_build.norm(document[3].get_text()))
+            self.assertNotIn(eighteenth, fast_build.norm(document[4].get_text()))
 
 
 if __name__ == "__main__":

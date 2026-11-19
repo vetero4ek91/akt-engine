@@ -12,6 +12,10 @@ import tempfile
 import time
 
 
+DAMAGE_ROWS_PER_SHEET = 17  # Capacity of Favorit_AKT_autonomous.js.
+CONCLUSION_HEADING = "Характер описанных повреждений"
+
+
 EXPERT_SOURCES = ("EXPERT_KNOWLEDGE.md", "CASES.md", "knowledge/CORRECTIONS.md")
 EXPERT_CHECKS = (
     "professional_wording",
@@ -110,12 +114,17 @@ def check_pair(text, heading, expected, max_lookahead=650):
 def check_pdf(path, claim, vin, damages, expected_count=None, checks=None, data_fields=None):
     import fitz
     pdf = fitz.open(path)
-    if len(pdf) < 4:
-        raise RuntimeError(f"В PDF всего {len(pdf)} стр., ожидается минимум 4")
+    damage_count = len(damages) if expected_count is None else expected_count
+    damage_sheets = max(1, (damage_count + DAMAGE_ROWS_PER_SHEET - 1) // DAMAGE_ROWS_PER_SHEET)
+    expected_pages = 3 + damage_sheets
+    if len(pdf) != expected_pages:
+        raise RuntimeError(f"В PDF {len(pdf)} стр., ожидается {expected_pages} для {damage_count} повреждений")
     pages = [p.get_text() for p in pdf]
     faults = []
     sigs_by_page = []
     for i, body in enumerate(pages, 1):
+        if f"лист№{i}актаосмотра№" not in norm(body):
+            faults.append(f"нет правильного номера листа {i}")
         if claim and claim not in body:
             faults.append(f"номер убытка отсутствует на листе {i}")
         sigs = set()
@@ -137,6 +146,10 @@ def check_pdf(path, claim, vin, damages, expected_count=None, checks=None, data_
         faults.append("таблица повреждений начинается не на третьем листе")
     if heading in pages[0] or heading in pages[1]:
         faults.append("таблица повреждений попала на первый или второй лист")
+    if CONCLUSION_HEADING not in pages[-1] or any(CONCLUSION_HEADING in body for body in pages[:-1]):
+        faults.append(f"заключение должно находиться на листе {expected_pages}")
+    if norm("Осмотр осуществил") not in norm(pages[-1]):
+        faults.append(f"нет блока подписей на листе {expected_pages}")
     damaged = norm(" ".join(pages[2:-1]))
     for n, damage in enumerate(damages, 1):
         for field in ("detail", "description"):
@@ -166,9 +179,9 @@ def check_pdf(path, claim, vin, damages, expected_count=None, checks=None, data_
         pair_states = [
             (0, "Идентификационные характеристики", checks.get("vinOk")),
             (0, "Дополнительное оборудование", checks.get("extraEquip")),
-            (2, "Осмотр проводился с проведением демонтажных работ", checks.get("dismantling")),
-            (3, "Характер описанных повреждений", checks.get("match")),
-            (3, "Скрытые повреждения, возможно наличие", checks.get("hidden")),
+            (len(pages)-2, "Осмотр проводился с проведением демонтажных работ", checks.get("dismantling")),
+            (len(pages)-1, CONCLUSION_HEADING, checks.get("match")),
+            (len(pages)-1, "Скрытые повреждения, возможно наличие", checks.get("hidden")),
         ]
         if data_fields is not None:
             pair_states += [
@@ -180,9 +193,9 @@ def check_pdf(path, claim, vin, damages, expected_count=None, checks=None, data_
                 faults.append(f"отметки Да/Нет на листе {page_idx+1}: {label}, ожидалось {state}")
         repairable = checks.get("repairable")
         if repairable is not None:
-            if not has_checked(pages[3], "ТС подлежит ремонту", repairable):
+            if not has_checked(pages[-1], "ТС подлежит ремонту", repairable):
                 faults.append("неверно отмечено: ТС подлежит ремонту")
-            if not has_checked(pages[3], "ТС не подлежит ремонту", not repairable):
+            if not has_checked(pages[-1], "ТС не подлежит ремонту", not repairable):
                 faults.append("неверно отмечено: ТС не подлежит ремонту")
     if faults:
         raise RuntimeError("PDF не прошёл проверку: " + "; ".join(faults))

@@ -280,8 +280,9 @@ try {
   let damageTableOriginal='', footerOriginal='';
   let allTables=[...xml.matchAll(/<w:tbl(?:\s[^>]*)?>[\s\S]*?<\/w:tbl>/g)];
   const target=allTables.find(m=>(m[0].match(/<w:tr(?:\s[^>]*)?>/g)||[]).length===37);
+  if(!target)throw new Error('Не найдена таблица повреждений');
   const sigTable=allTables.find(m=>m.index>target.index && m[0].includes('Осмотр осуществил'));
-  if(!target||!sigTable)throw new Error('Не найдена таблица повреждений / подписи');
+  if(!sigTable)throw new Error('Не найдена таблица подписей после повреждений');
   damageTableOriginal=target[0]; footerOriginal=sigTable[0];
   // Маркер листа из исходного бланка, между таблицей повреждений и подписями.
   const between=xml.slice(target.index+damageTableOriginal.length,sigTable.index);
@@ -291,19 +292,22 @@ try {
   if(damageRows.length!==37)throw new Error('Неожиданная структура таблицы: '+damageRows.length);
   const prefix=damageTableOriginal.slice(0,damageTableOriginal.indexOf(damageRows[0]));
   const suffix=damageTableOriginal.slice(damageTableOriginal.lastIndexOf(damageRows[36])+damageRows[36].length);
+  const damageRowsPerSheet=17;
   function makeTable(start, count, final){
-    const numberRows=Array.from({length:count},(_,i)=>damageRow(damageRows[2+(i%15)],start+i+1,damages[start+i]));
-    // Ровно 20 строк на лист. Пустые строки оставляем без жирного шрифта.
-    while(numberRows.length<15)numberRows.push(damageRow(damageRows[2+(numberRows.length%15)],'',[]));
+    // На первом листе сохраняем 15 строк бланка при коротком перечне.
+    // На листах продолжения выводим только фактические позиции.
+    const rowCount=start===0?Math.max(15,count):count;
+    const numberRows=Array.from({length:rowCount},(_,i)=>damageRow(
+      damageRows[2+i],i<count?start+i+1:'',damages[start+i]
+    ));
     return prefix+[damageRows[0],consolidateRow(damageRows[1],'Наименование повреждённой детали и описание повреждения',''),...numberRows,...final?[damageRows[36]]:[]].join('')+suffix;
   }
-  const firstTable=makeTable(0,Math.min(15,damages.length),damages.length<=15);
+  const firstTable=makeTable(0,Math.min(damageRowsPerSheet,damages.length),damages.length<=damageRowsPerSheet);
   xml=xml.replace(damageTableOriginal,firstTable);
-  if(damages.length>15){
+  if(damages.length>damageRowsPerSheet){
     let more='';
-    for(let start=15;start<damages.length;start+=15){
-      const n=Math.min(15,damages.length-start),last=start+n>=damages.length;
-      // Каждый блок с 21-го пункта вынесен на следующую страницу.
+    for(let start=damageRowsPerSheet;start<damages.length;start+=damageRowsPerSheet){
+      const n=Math.min(damageRowsPerSheet,damages.length-start),last=start+n>=damages.length;
       more+='<w:p><w:r><w:br w:type="page"/></w:r></w:p>'+makeTable(start,n,last)+sheetMarker+footerOriginal;
     }
     // Дополнительные страницы вставляем между третьим листом и выводами.
@@ -399,7 +403,7 @@ try {
   xml=xml.replace(/<w:tbl(?:\s[^>]*)?>[\s\S]*?<\/w:tbl>/g,t=>{
     if(!t.includes('Наименование повреждённой детали и описание повреждения'))return t;
     let ri=-1;return t.replace(rowRE,r=>{
-      ri++;if(ri<2 || ri>=17 || globalRepairIndex>=damages.length)return r;
+      ri++;if(ri<2 || ri>=2+damageRowsPerSheet || globalRepairIndex>=damages.length)return r;
       const k=KASKO_REPAIRS[globalRepairIndex++]||{};
       // В ОСАГО ремонтные воздействия в таблице КАСКО не проставляются.
       if(String(CHECKS.insurance||'').toUpperCase()!=='КАСКО')return r;
@@ -566,9 +570,12 @@ try {
   }
   trimEmptyTable(4,2);trimEmptyTable(5,2);
   trimEmptyTable(9,2);trimEmptyTable(10,2);trimEmptyTable(15,7);
-  editTable(16,t=>t.replace(/<w:trHeight w:val="(\d+)"/g,(m,n)=>`<w:trHeight w:val="${Math.round(Number(n)*0.73)}"`));
+  // Номер таблицы с выводами меняется при добавлении листов повреждений.
+  xml=xml.replace(tblRE,t=>t.includes('Выводы по результатам ') && t.includes('первичного/дополнительного осмотра')
+    ? t.replace(/<w:trHeight w:val="(\d+)"/g,(_m,n)=>`<w:trHeight w:val="${Math.round(Number(n)*0.73)}"`)
+    : t);
 
-  // Четвёртый лист начинается целым блоком заключения.
+  // Заключение начинается с нового листа сразу после последней таблицы повреждений.
   const conclusionTable=[...xml.matchAll(tblRE)].find(m=>m[0].includes('Характер описанных повреждений'));
   if(conclusionTable) xml=xml.slice(0,conclusionTable.index)+'<w:p><w:r><w:br w:type="page"/></w:r></w:p>'+xml.slice(conclusionTable.index);
   // Владелец информирован, но акт не подписан им.
@@ -670,15 +677,6 @@ try {
     const pAt=matches.length?matches[matches.length-1].index:-1;
     if(pAt>=0)xml=xml.slice(0,pAt)+'<w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>'+xml.slice(pAt);
   }
-  // Строго: лист с повреждениями ВСЕГДА начинается с новой страницы (лист 3).
-  // Разрыв ставится до всей таблицы, а не внутри её первой строки.
-  const damageHead=damages[0].detail;
-  const dmgHeadAt=xml.indexOf(damageHead);
-  if(dmgHeadAt<0) throw new Error('Не найден заголовок листа повреждений');
-  const dmgTableAt=xml.lastIndexOf('<w:tbl>',dmgHeadAt);
-  if(dmgTableAt<0) throw new Error('Не найдена таблица повреждений');
-  // removed duplicated damage break
-
   // Динамические строки в двух разделах первого листа.
   // При отсутствии записей оставляем 1 пустую строку и исходную отметку.
   // При наличии записей автоматически увеличиваем высоту ячейки.
