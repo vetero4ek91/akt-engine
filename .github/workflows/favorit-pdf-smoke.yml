@@ -1,0 +1,54 @@
+name: Favorit 2.0 PDF smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pdf-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      FAVORIT_ASSETS_ZIP_B64: ${{ secrets.FAVORIT_ASSETS_ZIP_B64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install LibreOffice
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libreoffice-writer poppler-utils
+      - name: Restore private build assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$FAVORIT_ASSETS_ZIP_B64" ]; then
+            echo "::error::Configure secret FAVORIT_ASSETS_ZIP_B64 with base64-encoded ZIP containing four required assets."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/favorit-assets"
+          printf '%s' "$FAVORIT_ASSETS_ZIP_B64" | base64 -d > "$RUNNER_TEMP/favorit-assets.zip"
+          unzip -q "$RUNNER_TEMP/favorit-assets.zip" -d "$RUNNER_TEMP/favorit-assets"
+          for file in 'АО_18.11.2026_fin_с восст. рем (1).docx' signature.png drawing.txt podpis.js; do
+            test -s "$RUNNER_TEMP/favorit-assets/$file" || { echo "::error::Missing asset: $file"; exit 1; }
+            cp "$RUNNER_TEMP/favorit-assets/$file" favorit-2.0/
+          done
+      - name: Run generator with intentionally empty test data
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check favorit-2.0/New_Favorit_AKT_refined.js
+          AKT_TEST=1 AKT_OUT="$RUNNER_TEMP/favorit-smoke.docx" node favorit-2.0/New_Favorit_AKT_refined.js
+          test -s "$RUNNER_TEMP/favorit-smoke.docx"
+          mkdir -p "$RUNNER_TEMP/pdf"
+          libreoffice -env:UserInstallation=file:///tmp/lo-favorit-ci --headless --convert-to pdf --outdir "$RUNNER_TEMP/pdf" "$RUNNER_TEMP/favorit-smoke.docx"
+          test -s "$RUNNER_TEMP/pdf/favorit-smoke.pdf"
+          pdfinfo "$RUNNER_TEMP/pdf/favorit-smoke.pdf" | grep '^Pages:'
+          echo "Smoke test passed. No real client data processed."
+      - name: Upload test PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: favorit-smoke-pdf
+          path: ${{ runner.temp }}/pdf/favorit-smoke.pdf
+          retention-days: 1
