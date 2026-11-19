@@ -1,0 +1,41 @@
+name: Favorit 2.0 engine preflight
+
+on:
+  push:
+    paths:
+      - '.github/workflows/favorit-preflight.yml'
+      - 'favorit-2.0/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify generator syntax
+        run: node --check favorit-2.0/New_Favorit_AKT_refined.js
+      - name: Check required build assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd favorit-2.0
+          missing=0
+          for asset in 'АО_18.11.2026_fin_с восст. рем (1).docx' signature.png drawing.txt; do
+            if [ -f "$asset" ]; then
+              echo "OK: $asset"
+            else
+              echo "::warning::Missing required build asset: $asset"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "::notice::Generator syntax checked. PDF build unavailable until missing assets are supplied securely."
+          fi
