@@ -18,7 +18,25 @@ def run(args, timeout, env=None):
     return result
 
 
-def check_pdf(path, claim, vin, damage_names):
+def read_js_data(generator):
+    """Read only JS input block in isolated Node VM without executing the generator."""
+    js = r"""
+const fs = require('fs'), vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const marker = '// Конец блока данных.';
+if (source.split(marker).length !== 2) throw Error('Граница блока данных отсутствует');
+const input = source.split(marker)[0];
+process.stdout.write(vm.runInNewContext(
+  input + '\nJSON.stringify({D,damages})', {JSON}, {timeout:1000}));
+"""
+    return json.loads(run(["node", "-e", js, str(generator)], 5).stdout)
+
+
+def norm(text):
+    return re.sub(r"\\s+", "", text).casefold().replace("ё", "е")
+
+
+def check_pdf(path, claim, vin, damage_names, expected_count=None):
     import fitz
     pdf = fitz.open(path)
     if len(pdf) < 4:
@@ -44,6 +62,12 @@ def check_pdf(path, claim, vin, damage_names):
         name = re.sub(r"\s+", " ", name.strip().lower())
         if name and name not in damaged:
             faults.append(f"нет позиции повреждения: {name}")
+    if expected_count is not None:
+        # In the autonomous form each damage row's index is printed on its own line.
+        numbers = [int(n) for n in re.findall(
+            r"(?m)^\\s*(\\d{1,3})\\s*$", "\\n".join(pages[2:-1]))]
+        if numbers != list(range(1, expected_count + 1)):
+            faults.append(f"Строки/нумерация ДТП: {numbers}, ожидалось 1..{expected_count}")
     if faults:
         raise RuntimeError("PDF не прошёл проверку: " + "; ".join(faults))
     return len(pdf)
@@ -58,6 +82,7 @@ def main():
     ap.add_argument("--claim", default="")
     ap.add_argument("--vin", default="")
     ap.add_argument("--damage", action="append", default=[], help="Название позиции для контроля; можно повторять")
+    ap.add_argument("--approved-damages", type=Path, help="Отдельный согласованный список деталей: UTF-8, строка = деталь")
     ap.add_argument("--test", action="store_true", help="Разрешить неполные тестовые реквизиты")
     args = ap.parse_args()
     if not args.generator and not args.workdir:
@@ -65,8 +90,30 @@ def main():
     generator = args.generator.resolve() if args.generator else args.workdir.resolve() / "generator.js"
     if not generator.is_file():
         ap.error(f"Не найден {generator}")
-    if args.vin and len(args.vin) != 17:
+    data = read_js_data(generator)
+    js_claim = str(data["D"].get("claimNo") or "")
+    js_vin = str(data["D"].get("vin") or "")
+    if args.claim and args.claim != js_claim:
+        ap.error("Номер убытка аргумента не соответствует JS")
+    if args.vin and args.vin != js_vin:
+        ap.error("VIN аргумента не соответствует JS")
+    claim = args.claim or js_claim
+    vin = args.vin or js_vin
+    if vin and len(vin) != 17:
         ap.error("VIN должен содержать 17 символов")
+    if not args.test and (not claim or not vin):
+        ap.error("В JS не заполнены номер убытка / VIN")
+    names = [d["detail"] for d in data["damages"]]
+    if not args.test and not names:
+        ap.error("В JS нет списка ДТП")
+    for name in args.damage:
+        if norm(name) not in {norm(n) for n in names}:
+            ap.error(f"Переданное повреждение отсутствует в JS: {name}")
+    if args.approved_damages:
+        approved = [line.strip() for line in args.approved_damages.read_text(encoding="utf-8-sig").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        if [norm(x) for x in approved] != [norm(x) for x in names]:
+            ap.error("Список ДТП в JS отличается от согласованного; сборка остановлена")
     if args.core_fnv is None and not args.test:
         ap.error("Нужен --core-fnv из актуального GitHub-генератора")
     if args.core_fnv is not None:
@@ -95,7 +142,7 @@ def main():
         pdf = temp / "act.pdf"
         if not pdf.exists():
             raise RuntimeError("LibreOffice не создал PDF")
-        pages = check_pdf(pdf, args.claim, args.vin, args.damage)
+        pages = check_pdf(pdf, claim, vin, names, expected_count=len(names))
         dest = args.output.resolve()
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(pdf, dest)
