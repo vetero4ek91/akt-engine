@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fast PDF build/preflight for the existing Favorit JS generator. Does not edit it."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,55 @@ import shutil
 import subprocess
 import tempfile
 import time
+
+
+EXPERT_SOURCES = ("EXPERT_KNOWLEDGE.md", "CASES.md", "knowledge/CORRECTIONS.md")
+EXPERT_CHECKS = (
+    "professional_wording",
+    "damage_completeness",
+    "operational_defects",
+    "evidence_classification",
+)
+
+
+def sha256_file(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def check_expert_review(report_path, generator):
+    """Validate the recorded expert review for these exact build inputs."""
+    if report_path is None:
+        raise ValueError("Реальный акт: обязателен --expert-review с отчётом экспертной проверки")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Не удалось прочитать JSON-отчёт экспертной проверки: {exc}") from exc
+
+    if not isinstance(report, dict):
+        raise ValueError("Отчёт экспертной проверки должен быть JSON-объектом")
+    if report.get("open_errors") != []:
+        raise ValueError("В экспертной проверке есть незакрытые ошибки или отсутствует массив open_errors")
+
+    checks = report.get("checks")
+    if not isinstance(checks, dict):
+        raise ValueError("В отчёте отсутствуют результаты экспертной проверки (checks)")
+    for name in EXPERT_CHECKS:
+        note = checks.get(name)
+        if not isinstance(note, str) or not note.strip():
+            raise ValueError(f"В экспертном отчёте нет результата проверки: {name}")
+
+    try:
+        generator_hash = sha256_file(generator)
+        project_root = Path(__file__).resolve().parents[1]
+        sources = {name: sha256_file(project_root / name) for name in EXPERT_SOURCES}
+    except OSError as exc:
+        raise ValueError(f"Не удалось сверить входной JS или экспертную базу: {exc}") from exc
+
+    if report.get("generator_sha256") != generator_hash:
+        raise ValueError("Экспертный отчёт относится к другой редакции входного JS")
+    if report.get("sources") != sources:
+        raise ValueError("Экспертный отчёт не соответствует файлам экспертной базы сборщика")
+    return generator_hash
 
 
 def run(args, timeout, env=None):
@@ -149,6 +199,7 @@ def main():
     ap.add_argument("--vin", default="")
     ap.add_argument("--damage", action="append", default=[], help="Название позиции для контроля; можно повторять")
     ap.add_argument("--approved-damages", type=Path, help="Отдельный согласованный список деталей: UTF-8, строка = деталь")
+    ap.add_argument("--expert-review", type=Path, help="JSON-отчёт экспертной проверки для рабочего акта")
     ap.add_argument("--test", action="store_true", help="Разрешить неполные тестовые реквизиты")
     args = ap.parse_args()
     if not args.generator and not args.workdir:
@@ -156,6 +207,12 @@ def main():
     generator = args.generator.resolve() if args.generator else args.workdir.resolve() / "generator.js"
     if not generator.is_file():
         ap.error(f"Не найден {generator}")
+    reviewed_hash = None
+    if not args.test or args.expert_review is not None:
+        try:
+            reviewed_hash = check_expert_review(args.expert_review, generator)
+        except ValueError as exc:
+            ap.error(str(exc))
     data = read_js_data(generator)
     js_claim = str(data["D"].get("claimNo") or "")
     js_vin = str(data["D"].get("vin") or "")
@@ -206,6 +263,10 @@ def main():
         env = dict(os.environ, AKT_OUT=str(docx))
         if args.test:
             env["AKT_TEST"] = "1"
+        else:
+            env.pop("AKT_TEST", None)
+        if reviewed_hash is not None and sha256_file(generator) != reviewed_hash:
+            ap.error("Входной JS изменён после экспертной проверки")
         run(["node", str(generator)], 25, env=env)
         t1 = time.monotonic()
         profile = (temp / "lo-profile").as_uri()
