@@ -33,7 +33,7 @@ process.stdout.write(vm.runInNewContext(
 
 
 def norm(text):
-    return re.sub(r"\\s+", "", text).casefold().replace("ё", "е")
+    return re.sub(r"\s+", "", text).casefold().replace("ё", "е")
 
 
 def check_pdf(path, claim, vin, damage_names, expected_count=None):
@@ -65,7 +65,7 @@ def check_pdf(path, claim, vin, damage_names, expected_count=None):
     if expected_count is not None:
         # In the autonomous form each damage row's index is printed on its own line.
         numbers = [int(n) for n in re.findall(
-            r"(?m)^\\s*(\\d{1,3})\\s*$", "\\n".join(pages[2:-1]))]
+            r"(?m)^\s*(\d{1,3})\s*$", "\n".join(pages[2:-1]))]
         if numbers != list(range(1, expected_count + 1)):
             faults.append(f"Строки/нумерация ДТП: {numbers}, ожидалось 1..{expected_count}")
     if faults:
