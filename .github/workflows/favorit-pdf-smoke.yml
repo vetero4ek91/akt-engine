@@ -46,9 +46,3 @@ jobs:
           test -s "$RUNNER_TEMP/pdf/favorit-smoke.pdf"
           pdfinfo "$RUNNER_TEMP/pdf/favorit-smoke.pdf" | grep '^Pages:'
           echo "Smoke test passed. No real client data processed."
-      - name: Upload test PDF
-        uses: actions/upload-artifact@v4
-        with:
-          name: favorit-smoke-pdf
-          path: ${{ runner.temp }}/pdf/favorit-smoke.pdf
-          retention-days: 1
