@@ -27,47 +27,77 @@ const marker = '// Конец блока данных.';
 if (source.split(marker).length !== 2) throw Error('Граница блока данных отсутствует');
 const input = source.split(marker)[0];
 process.stdout.write(vm.runInNewContext(
-  input + '\nJSON.stringify({D,damages})', {JSON}, {timeout:1000}));
+  input + '\nJSON.stringify({D,damages,CHECKS,SIGN_EXPERT})', {JSON}, {timeout:1000}));
 """
     return json.loads(run(["node", "-e", js, str(generator)], 5).stdout)
+
 
 
 def norm(text):
     return re.sub(r"\s+", "", text).casefold().replace("ё", "е")
 
 
-def check_pdf(path, claim, vin, damage_names, expected_count=None):
+def has_checked(text, label, selected):
+    mark = "☒" if selected else "☐"
+    return re.search(re.escape(mark) + r"\s*" + re.escape(label), text, re.I) is not None
+
+
+def check_pdf(path, claim, vin, damages, expected_count=None, checks=None):
     import fitz
     pdf = fitz.open(path)
     if len(pdf) < 4:
         raise RuntimeError(f"В PDF всего {len(pdf)} стр., ожидается минимум 4")
     pages = [p.get_text() for p in pdf]
     faults = []
-    for i, text in enumerate(pages, 1):
-        if claim and claim not in text:
+    sigs_by_page = []
+    for i, body in enumerate(pages, 1):
+        if claim and claim not in body:
             faults.append(f"номер убытка отсутствует на листе {i}")
-        if not pdf[i-1].get_images(full=True):
-            faults.append(f"нет изображения факсимиле на листе {i}")
-    # VIN is printed as 17 separate physical cells in the existing DOCX form.
-    compact = re.sub(r"\s+", "", pages[0]).upper()
-    if vin and vin.upper() not in compact:
+        sigs = set()
+        page = pdf[i-1]
+        for img in page.get_images(full=True):
+            xref = img[0]
+            for rect in page.get_image_rects(xref):
+                if rect.x0 > page.rect.width * 0.65 and rect.y0 > page.rect.height * 0.50:
+                    sigs.add(xref)
+        if not sigs:
+            faults.append(f"нет факсимиле в зоне подписи эксперта на листе {i}")
+        sigs_by_page.append(sigs)
+    if sigs_by_page and not set.intersection(*sigs_by_page):
+        faults.append("факсимиле различается между листами")
+    if vin and norm(vin) not in norm(pages[0]):
         faults.append("VIN не найден на первом листе")
-    if "Повреждения, указанные" not in pages[2]:
+    heading = "Повреждения, указанные"
+    if heading not in pages[2]:
         faults.append("таблица повреждений начинается не на третьем листе")
-    if "Повреждения, указанные" in pages[0] or "Повреждения, указанные" in pages[1]:
+    if heading in pages[0] or heading in pages[1]:
         faults.append("таблица повреждений попала на первый или второй лист")
-    damaged = " ".join(pages[2:-1]).lower()
-    damaged = re.sub(r"\s+", " ", damaged)
-    for name in damage_names:
-        name = re.sub(r"\s+", " ", name.strip().lower())
-        if name and name not in damaged:
-            faults.append(f"нет позиции повреждения: {name}")
+    damaged = norm(" ".join(pages[2:-1]))
+    for n, damage in enumerate(damages, 1):
+        for field in ("detail", "description"):
+            fragment = str(damage.get(field, "")).strip()
+            if not fragment or norm(fragment) not in damaged:
+                faults.append(f"позиция ДТП {n}: {field} отсутствует или обрезана в PDF")
+    numbers = [int(n) for n in re.findall(
+        r"(?m)^\s*(\d{1,3})\s*$", "\n".join(pages[2:-1]))]
     if expected_count is not None:
-        # In the autonomous form each damage row's index is printed on its own line.
-        numbers = [int(n) for n in re.findall(
-            r"(?m)^\s*(\d{1,3})\s*$", "\n".join(pages[2:-1]))]
+        if len(numbers) != expected_count:
+            faults.append(f"число строк ДТП в PDF {len(numbers)}, в JS {expected_count}")
         if numbers != list(range(1, expected_count + 1)):
-            faults.append(f"Строки/нумерация ДТП: {numbers}, ожидалось 1..{expected_count}")
+            faults.append(f"нумерация повреждений: {numbers}, ожидалось 1..{expected_count}")
+    if checks:
+        mapped = [
+            (0, "ОСАГО", str(checks.get("insurance", "")).upper() == "ОСАГО"),
+            (0, "КАСКО", str(checks.get("insurance", "")).upper() == "КАСКО"),
+            (0, "первичный", checks.get("inspection") == "первичный"),
+            (0, "выездной", checks.get("place") == "выездной"),
+            (1, "в светлое время суток", checks.get("light") == "day"),
+            (1, "в грязном виде", checks.get("cleanliness") in ("грязное", "грязный")),
+            (1, "в условиях СТОА", checks.get("stoa") is True),
+        ]
+        for page_idx, label, selected in mapped:
+            if not has_checked(pages[page_idx], label, selected):
+                faults.append(f"галочка листа {page_idx+1}: {label} (ожидалось {selected})")
     if faults:
         raise RuntimeError("PDF не прошёл проверку: " + "; ".join(faults))
     return len(pdf)
@@ -106,6 +136,10 @@ def main():
     names = [d["detail"] for d in data["damages"]]
     if not args.test and not names:
         ap.error("В JS нет списка ДТП")
+    if not args.test and not args.approved_damages:
+        ap.error("Реальный акт: обязателен --approved-damages с согласованным перечнем")
+    if not args.test and data["SIGN_EXPERT"] is not True:
+        ap.error("В рабочем акте отключено факсимиле эксперта")
     for name in args.damage:
         if norm(name) not in {norm(n) for n in names}:
             ap.error(f"Переданное повреждение отсутствует в JS: {name}")
@@ -142,12 +176,12 @@ def main():
         pdf = temp / "act.pdf"
         if not pdf.exists():
             raise RuntimeError("LibreOffice не создал PDF")
-        pages = check_pdf(pdf, claim, vin, names, expected_count=len(names))
+        pages = check_pdf(pdf, claim, vin, data["damages"], expected_count=len(names), checks=data["CHECKS"])
         dest = args.output.resolve()
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(pdf, dest)
         t3 = time.monotonic()
-    print(json.dumps({"ok": True, "pdf": str(dest), "pages": pages, "seconds": {"docx": round(t1-t0, 2), "pdf": round(t2-t1, 2), "check_copy": round(t3-t2, 2), "total": round(t3-t0, 2)}}, ensure_ascii=False))
+    print(json.dumps({"ok": True, "pdf": str(dest), "pages": pages, "damages": len(names), "seconds": {"docx": round(t1-t0, 2), "pdf": round(t2-t1, 2), "check_copy": round(t3-t2, 2), "total": round(t3-t0, 2)}}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
