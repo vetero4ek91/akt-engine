@@ -51,19 +51,35 @@ def check_pdf(path, claim, vin, damage_names):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--workdir", type=Path, required=True, help="Папка с заполненным generator.js и штатным DOCX")
+    ap.add_argument("--workdir", type=Path, help="Папка с заполненным generator.js и штатным DOCX")
+    ap.add_argument("--generator", type=Path, help="Точный путь готового JS с блоком D (ускоренный повтор)")
+    ap.add_argument("--core-fnv", type=int, help="Контрольный FNV-1a суффикса JS из GitHub main")
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--claim", default="")
     ap.add_argument("--vin", default="")
     ap.add_argument("--damage", action="append", default=[], help="Название позиции для контроля; можно повторять")
     ap.add_argument("--test", action="store_true", help="Разрешить неполные тестовые реквизиты")
     args = ap.parse_args()
-    src = args.workdir.resolve()
-    generator = src / "generator.js"
+    if not args.generator and not args.workdir:
+        ap.error("Нужен --generator или --workdir")
+    generator = args.generator.resolve() if args.generator else args.workdir.resolve() / "generator.js"
     if not generator.is_file():
         ap.error(f"Не найден {generator}")
     if args.vin and len(args.vin) != 17:
         ap.error("VIN должен содержать 17 символов")
+    if args.core_fnv is None and not args.test:
+        ap.error("Нужен --core-fnv из актуального GitHub-генератора")
+    if args.core_fnv is not None:
+        source = generator.read_text(encoding="utf-8")
+        marker = "// Конец блока данных."
+        if source.count(marker) != 1:
+            ap.error("Граница блока D не найдена или неоднозначна")
+        core = source[source.index(marker):]
+        h = 2166136261
+        for ch in core:
+            h = ((h ^ ord(ch)) * 16777619) & 0xffffffff
+        if h != args.core_fnv:
+            ap.error("Генератор не соответствует актуальному GitHub main; сборка заблокирована")
     t0 = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="favorit_fast_") as td:
         temp = Path(td)
