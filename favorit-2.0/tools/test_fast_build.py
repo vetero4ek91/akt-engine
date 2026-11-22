@@ -96,7 +96,7 @@ class ExpertReviewTests(unittest.TestCase):
     "PDF pagination tests require Node.js, zip, unzip, LibreOffice and PyMuPDF",
 )
 class PaginationTests(unittest.TestCase):
-    def render_act(self, count):
+    def render_act(self, count, insurance="КАСКО"):
         workspace = tempfile.TemporaryDirectory()
         self.addCleanup(workspace.cleanup)
         workdir = Path(workspace.name)
@@ -116,6 +116,9 @@ class PaginationTests(unittest.TestCase):
         self.assertIn("const damages = [];", source)
         self.assertIn("claimNo:''", source)
         source = source.replace("claimNo:''", f"claimNo:'{claim}'", 1)
+        if insurance != "КАСКО":
+            source = source.replace("insurance:'КАСКО'",
+                                    f"insurance:'{insurance}'", 1)
         source = source.replace(
             "const damages = [];",
             "const damages = " + json.dumps(damages, ensure_ascii=False) + ";",
@@ -131,35 +134,60 @@ class PaginationTests(unittest.TestCase):
                         "--convert-to", "pdf", "--outdir", str(workdir), str(docx)], 35)
         return workdir / "act.pdf", claim, damages
 
-    def test_seventeen_damage_rows_and_conclusion_fit_four_pages(self):
+    def assert_damage_structure(self, count, insurance="КАСКО"):
         import fitz
 
-        pdf, claim, damages = self.render_act(17)
-        self.assertEqual(fast_build.check_pdf(pdf, claim, "", damages, 17), 4)
+        pdf, claim, damages = self.render_act(count, insurance=insurance)
         with fitz.open(pdf) as document:
-            for damage in damages:
-                detail = fast_build.norm(damage["detail"])
-                self.assertIn(detail, fast_build.norm(document[2].get_text()))
-                self.assertNotIn(detail, fast_build.norm(document[3].get_text()))
+            self.assertGreaterEqual(len(document), 4)
+            self.assertEqual(
+                fast_build.check_pdf(pdf, claim, "", damages, count),
+                len(document),
+            )
+            for item in damages:
+                detail = fast_build.norm(item["detail"])
+                description = fast_build.norm(item["description"])
+                pages = [
+                    idx for idx in range(2, len(document) - 1)
+                    if detail in fast_build.norm(document[idx].get_text())
+                ]
+                self.assertEqual(len(pages), 1, f"Деталь должна встретиться на одном листе: {detail}")
+                self.assertIn(
+                    description, fast_build.norm(document[pages[0]].get_text())
+                )
+            self.assertIn("Характер описанных повреждений", document[-1].get_text())
+            table_text = "\\n".join(document[idx].get_text()
+                                   for idx in range(2, len(document) - 1))
+            if insurance == "ОСАГО":
+                self.assertNotIn("Замена", table_text)
+                self.assertNotIn("Диаг-ностика", table_text)
+            else:
+                self.assertIn("Замена", table_text)
+                self.assertIn("Окраска", table_text)
+        return pdf, claim, damages
+
+    def test_seven_rows_without_blank_filler(self):
+        self.assert_damage_structure(7)
+
+    def test_seventeen_rows_without_fixed_page_quota(self):
+        self.assert_damage_structure(17)
+
+    def test_eighteen_rows_may_fit_one_damage_page(self):
+        self.assert_damage_structure(18)
+
+    def test_osago_table_has_no_kasko_columns(self):
+        self.assert_damage_structure(18, insurance="ОСАГО")
+
+    def test_extra_blank_page_is_rejected(self):
+        import fitz
+
+        pdf, claim, damages = self.assert_damage_structure(7)
+        with fitz.open(pdf) as document:
             document.new_page()
             extra = pdf.with_name("extra-page.pdf")
             document.save(extra)
-        with self.assertRaisesRegex(RuntimeError, "5 стр., ожидается 4"):
-            fast_build.check_pdf(extra, claim, "", damages, 17)
-
-    def test_eighteenth_damage_moves_to_continuation_page(self):
-        import fitz
-
-        pdf, claim, damages = self.render_act(18)
-        self.assertEqual(fast_build.check_pdf(pdf, claim, "", damages, 18), 5)
-        with fitz.open(pdf) as document:
-            for damage in damages[:17]:
-                self.assertIn(fast_build.norm(damage["detail"]),
-                              fast_build.norm(document[2].get_text()))
-            eighteenth = fast_build.norm(damages[17]["detail"])
-            self.assertNotIn(eighteenth, fast_build.norm(document[2].get_text()))
-            self.assertIn(eighteenth, fast_build.norm(document[3].get_text()))
-            self.assertNotIn(eighteenth, fast_build.norm(document[4].get_text()))
+        with self.assertRaisesRegex(RuntimeError, "лишний пустой лист"):
+            fast_build.check_pdf(extra, claim, "", damages, 7)
 
 
 if __name__ == "__main__":
