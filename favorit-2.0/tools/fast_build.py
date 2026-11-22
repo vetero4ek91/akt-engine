@@ -12,7 +12,7 @@ import tempfile
 import time
 
 
-DAMAGE_ROWS_PER_SHEET = 17  # Capacity of Favorit_AKT_autonomous.js.
+
 CONCLUSION_HEADING = "Характер описанных повреждений"
 
 
@@ -115,10 +115,9 @@ def check_pdf(path, claim, vin, damages, expected_count=None, checks=None, data_
     import fitz
     pdf = fitz.open(path)
     damage_count = len(damages) if expected_count is None else expected_count
-    damage_sheets = max(1, (damage_count + DAMAGE_ROWS_PER_SHEET - 1) // DAMAGE_ROWS_PER_SHEET)
-    expected_pages = 3 + damage_sheets
-    if len(pdf) != expected_pages:
-        raise RuntimeError(f"В PDF {len(pdf)} стр., ожидается {expected_pages} для {damage_count} повреждений")
+    if len(pdf) < 4:
+        raise RuntimeError(f"PDF не прошёл проверку: {len(pdf)} листов; требуется два вводных, минимум один лист перечня и отдельный лист заключения")
+    expected_pages = len(pdf)  # Actual structure, not a fixed damage-count formula.
     pages = [p.get_text() for p in pdf]
     faults = []
     sigs_by_page = []
@@ -150,19 +149,62 @@ def check_pdf(path, claim, vin, damages, expected_count=None, checks=None, data_
         faults.append(f"заключение должно находиться на листе {expected_pages}")
     if norm("Осмотр осуществил") not in norm(pages[-1]):
         faults.append(f"нет блока подписей на листе {expected_pages}")
-    damaged = norm(" ".join(pages[2:-1]))
-    for n, damage in enumerate(damages, 1):
-        for field in ("detail", "description"):
-            fragment = str(damage.get(field, "")).strip()
-            if not fragment or norm(fragment) not in damaged:
-                faults.append(f"позиция ДТП {n}: {field} отсутствует или обрезана в PDF")
-    numbers = [int(n) for n in re.findall(
-        r"(?m)^\s*(\d{1,3})\s*$", "\n".join(pages[2:-1]))]
-    if expected_count is not None:
-        if len(numbers) != expected_count:
-            faults.append(f"число строк ДТП в PDF {len(numbers)}, в JS {expected_count}")
-        if numbers != list(range(1, expected_count + 1)):
-            faults.append(f"нумерация повреждений: {numbers}, ожидалось 1..{expected_count}")
+    # Geometric row numbers plus sequential full description text. Word may
+    # vertically center the number relative to multi-line details, and may
+    # combine adjacent cell paragraphs into one text block. Do not use one
+    # fixed y-offset for both number and description.
+    all_numbers = []
+    for page_idx in range(2, len(pdf)-1):
+        page=pdf[page_idx]
+        row_words=[w for w in page.get_text("words")
+            if w[0]<37 and 80<w[1]<page.rect.height*.87
+            and re.fullmatch(r"\d{1,3}",w[4])]
+        row_words.sort(key=lambda w:w[1])
+        numbers=[int(w[4]) for w in row_words]
+        if not numbers:
+            faults.append(f"лист {page_idx+1} перечня пуст: отсутствуют реальные позиции")
+            continue
+        # PyMuPDF's standard text order follows the cell paragraphs even when
+        # blocks are merged or the narrow number cell is vertically centered.
+        body=norm(page.get_text())
+        cursor=0
+        for number in numbers:
+            if number<1 or number>len(damages):
+                faults.append(f"лишняя или неизвестная позиция №{number} на листе {page_idx+1}")
+                continue
+            damage=damages[number-1]
+            detail=norm(str(damage.get("detail", "")))
+            descr=norm(str(damage.get("description", "")))
+            start=body.find(detail,cursor)
+            if start<0:
+                faults.append(f"позиция №{number} на листе {page_idx+1}: деталь отсутствует или перепутана")
+                continue
+            finish=body.find(descr,start+len(detail))
+            if finish<0:
+                faults.append(f"позиция №{number} на листе {page_idx+1}: описание отсутствует или обрезано")
+                continue
+            cursor=finish+len(descr)
+        all_numbers.extend(numbers)
+    if all_numbers != list(range(1, damage_count+1)):
+        faults.append(f"нумерация или полнота позиций: {all_numbers}; ожидается 1..{damage_count} ровно по одному разу")
+    # An extra completely blank page, even after the conclusion, is not allowed.
+    for i, page in enumerate(pdf):
+        if len(page.get_text().strip()) < 25:
+            faults.append(f"лишний пустой лист {i+1}")
+    # Insurance-specific table structure on every continuation page.
+    insurance = str((checks or {}).get("insurance", "")).upper()
+    for page_idx in range(2, len(pdf)-1):
+        t=norm(pages[page_idx])
+        if insurance=="ОСАГО":
+            if norm("ОСАГО") not in t:
+                faults.append(f"лист {page_idx+1}: нет заголовка ОСАГО")
+            for forbidden in ("Замена", "Ремонт, час", "Окраска", "Диаг-ностика"):
+                if norm(forbidden) in t:
+                    faults.append(f"лист {page_idx+1}: лишняя графа КАСКО {forbidden}")
+        elif insurance=="КАСКО":
+            for required in ("КАСКО", "Замена", "Ремонт,", "Окраска", "Диаг-ностика"):
+                if norm(required) not in t:
+                    faults.append(f"лист {page_idx+1}: отсутствует заголовок {required}")
     if checks:
         mapped = [
             (0, "ОСАГО", str(checks.get("insurance", "")).upper() == "ОСАГО"),
