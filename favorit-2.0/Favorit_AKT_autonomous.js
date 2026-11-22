@@ -252,20 +252,21 @@ try {
   function runDamage(value, bold) {
     return `<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b w:val="${bold?1:0}"/><w:sz w:val="17"/><w:szCs w:val="17"/></w:rPr><w:t xml:space="preserve">${escape(value)}</w:t></w:r>`;
   }
-  function wideCell(old, name, descr) {
-    let cell=old.replace(/<w:tcW[^>]*\/>/, '<w:tcW w:w="3506" w:type="pct"/>');
-    cell=cell.replace('</w:tcPr>','<w:gridSpan w:val="4"/></w:tcPr>');
+  function printedDamageCell(old, value, bold) {
+    let cell=old.replace(/<w:tcW[^>]*\/>/, '<w:tcW w:w="1000" w:type="pct"/>');
+    cell=cell.replace(/<w:gridSpan[^>]*\/>/g,'');
     cell=cell.replace(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g,'');
-    let body='<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>';
-    if(name)body+=runDamage(name, true)+(descr?runDamage(' — '+descr, false):'');
+    let body='<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="190" w:lineRule="exact"/></w:pPr>';
+    if(value)body+=runDamage(value,bold);
     body+='</w:p>';
     return cell.replace('</w:tc>',body+'</w:tc>');
   }
   function consolidateRow(row, name, desc) {
     const a=asRowCells(row);
     if(a.length!==9)throw new Error('Неверная строка таблицы повреждений: '+a.length);
-    const wide=wideCell(a[1],name,desc);
-    return row.replace(a.slice(1,5).join(''),wide);
+    const nameCell=printedDamageCell(a[1],name,true);
+    const descCell=printedDamageCell(a[2],desc,false);
+    return row.replace(a.slice(1,5).join(''),nameCell+descCell);
   }
   function damageRow(row, number, item){
     let name='', desc='';
@@ -280,9 +281,8 @@ try {
   let damageTableOriginal='', footerOriginal='';
   let allTables=[...xml.matchAll(/<w:tbl(?:\s[^>]*)?>[\s\S]*?<\/w:tbl>/g)];
   const target=allTables.find(m=>(m[0].match(/<w:tr(?:\s[^>]*)?>/g)||[]).length===37);
-  if(!target)throw new Error('Не найдена таблица повреждений');
   const sigTable=allTables.find(m=>m.index>target.index && m[0].includes('Осмотр осуществил'));
-  if(!sigTable)throw new Error('Не найдена таблица подписей после повреждений');
+  if(!target||!sigTable)throw new Error('Не найдена таблица повреждений / подписи');
   damageTableOriginal=target[0]; footerOriginal=sigTable[0];
   // Маркер листа из исходного бланка, между таблицей повреждений и подписями.
   const between=xml.slice(target.index+damageTableOriginal.length,sigTable.index);
@@ -292,30 +292,145 @@ try {
   if(damageRows.length!==37)throw new Error('Неожиданная структура таблицы: '+damageRows.length);
   const prefix=damageTableOriginal.slice(0,damageTableOriginal.indexOf(damageRows[0]));
   const suffix=damageTableOriginal.slice(damageTableOriginal.lastIndexOf(damageRows[36])+damageRows[36].length);
-  const damageRowsPerSheet=17;
-  function makeTable(start, count, final){
-    // На первом листе сохраняем 15 строк бланка при коротком перечне.
-    // На листах продолжения выводим только фактические позиции.
-    const rowCount=start===0?Math.max(15,count):count;
-    const numberRows=Array.from({length:rowCount},(_,i)=>damageRow(
-      damageRows[2+i],i<count?start+i+1:'',damages[start+i]
-    ));
-    return prefix+[damageRows[0],consolidateRow(damageRows[1],'Наименование повреждённой детали и описание повреждения',''),...numberRows,...final?[damageRows[36]]:[]].join('')+suffix;
-  }
-  const firstTable=makeTable(0,Math.min(damageRowsPerSheet,damages.length),damages.length<=damageRowsPerSheet);
-  xml=xml.replace(damageTableOriginal,firstTable);
-  if(damages.length>damageRowsPerSheet){
-    let more='';
-    for(let start=damageRowsPerSheet;start<damages.length;start+=damageRowsPerSheet){
-      const n=Math.min(damageRowsPerSheet,damages.length-start),last=start+n>=damages.length;
-      more+='<w:p><w:r><w:br w:type="page"/></w:r></w:p>'+makeTable(start,n,last)+sheetMarker+footerOriginal;
+  // Pagination based on the estimated rendered height of each whole text row.
+  // The per-page real-row height is checked against the resulting PDF during tests.
+  const layoutFont = Number(process.env.AKT_LAYOUT_FONT || 8.5);
+  const compactTable = process.env.AKT_LAYOUT_COMPACT === '1';
+  const fontSizeHalfPoints = Math.round(layoutFont*2);
+  const lineHeightTwips = compactTable ? Math.round(layoutFont*21) : Math.round(layoutFont*22.35);
+  const cellMarginTwips = compactTable ? 12 : 30;
+  const isOsagoTable = String(CHECKS.insurance||'').toUpperCase()==='ОСАГО';
+  const rowContentWidthPt = isOsagoTable ? 382 : 278;
+  const pageContentHeightPt = 565;
+  const glyphRatio = {" ":0.2778,"!":0.2778,"\"":0.355,"#":0.5562,"$":0.5562,"%":0.8892,"&":0.667,"'":0.1909,"(":0.333,")":0.333,"*":0.3892,"+":0.584,",":0.2778,"-":0.333,".":0.2778,"/":0.2778,"0":0.5562,"1":0.5562,"2":0.5562,"3":0.5562,"4":0.5562,"5":0.5562,"6":0.5562,"7":0.5562,"8":0.5562,"9":0.5562,":":0.2778,";":0.2778,"<":0.584,"=":0.584,">":0.584,"?":0.5562,"@":1.0151,"A":0.667,"B":0.667,"C":0.7222,"D":0.7222,"E":0.667,"F":0.6108,"G":0.7778,"H":0.7222,"I":0.2778,"J":0.5,"K":0.667,"L":0.5562,"M":0.833,"N":0.7222,"O":0.7778,"P":0.667,"Q":0.7778,"R":0.7222,"S":0.667,"T":0.6108,"U":0.7222,"V":0.667,"W":0.9438,"X":0.667,"Y":0.667,"Z":0.6108,"[":0.2778,"\\":0.2778,"]":0.2778,"^":0.4692,"_":0.5562,"`":0.333,"a":0.5562,"b":0.5562,"c":0.5,"d":0.5562,"e":0.5562,"f":0.2778,"g":0.5562,"h":0.5562,"i":0.2222,"j":0.2222,"k":0.5,"l":0.2222,"m":0.833,"n":0.5562,"o":0.5562,"p":0.5562,"q":0.5562,"r":0.333,"s":0.5,"t":0.2778,"u":0.5562,"v":0.5,"w":0.7222,"x":0.5,"y":0.5,"z":0.5,"{":0.334,"|":0.2598,"}":0.334,"~":0.584,"Ѐ":0.667,"Ё":0.6675,"Ђ":0.8648,"Ѓ":0.5415,"Є":0.7188,"Ѕ":0.667,"І":0.2778,"Ї":0.2778,"Ј":0.5,"Љ":1.0571,"Њ":1.0103,"Ћ":0.854,"Ќ":0.5825,"Ѝ":0.7188,"Ў":0.6352,"Џ":0.7188,"А":0.667,"Б":0.6562,"В":0.667,"Г":0.5415,"Д":0.6773,"Е":0.667,"Ж":0.9233,"З":0.604,"И":0.7188,"Й":0.7188,"К":0.5825,"Л":0.6562,"М":0.833,"Н":0.7222,"О":0.7778,"П":0.7188,"Р":0.667,"С":0.7222,"Т":0.6108,"У":0.6352,"Ф":0.7602,"Х":0.667,"Ц":0.7398,"Ч":0.6665,"Ш":0.9165,"Щ":0.9375,"Ъ":0.7915,"Ы":0.8852,"Ь":0.6562,"Э":0.7188,"Ю":1.0103,"Я":0.7222,"а":0.5562,"б":0.5727,"в":0.5312,"г":0.3648,"д":0.5835,"е":0.5562,"ж":0.669,"з":0.4585,"и":0.5586,"й":0.5586,"к":0.4375,"л":0.5835,"м":0.6875,"н":0.5523,"о":0.5562,"п":0.5415,"р":0.5562,"с":0.5,"т":0.458,"у":0.5,"ф":0.8227,"х":0.5,"ц":0.5727,"ч":0.521,"ш":0.8023,"щ":0.8227,"ъ":0.625,"ы":0.7188,"ь":0.521,"э":0.5102,"ю":0.75,"я":0.5415,"ѐ":0.5562,"ё":0.5562,"ђ":0.5562,"ѓ":0.3648,"є":0.5102,"ѕ":0.5,"і":0.2222,"ї":0.2778,"ј":0.2222,"љ":0.9062,"њ":0.8125,"ћ":0.5562,"ќ":0.4375,"ѝ":0.5586,"ў":0.5,"џ":0.5523,"№":1.0728,"–":0.5562,"—":1.0,"«":0.5562,"»":0.5562,"…":1.0,"°":0.3999,"²":0.333,"³":0.333};
+  const approxWidth=(word,pt)=>[...String(word)].reduce((sum,ch)=>sum+(glyphRatio[ch]||0.55)*pt,0);
+  function rowHeight(item,pt,compact){
+    const value=String(item.description||'');
+    let lines=1,used=0;
+    for(const word of value.split(/\s+/)){
+      const w=approxWidth(word,pt)+approxWidth(' ',pt);
+      if(used>0&&used+w>rowContentWidthPt){lines++;used=0;}
+      used+=w;
     }
-    // Дополнительные страницы вставляем между третьим листом и выводами.
+    return Math.max(compact?11.5:13.3, lines*(compact?pt*1.06:pt*1.12) + (compact?1.2:3.2));
+  }
+  function greedy(items,pt,compact){
+    const out=[];let i=0;
+    while(i<items.length){
+      const first=i;let sum=0;
+      while(i<items.length){
+        const h=rowHeight(items[i],pt,compact);
+        if(i>first&&sum+h>(compact?585:pageContentHeightPt))break;
+        sum+=h;i++;
+      }
+      out.push(i-first);
+    }
+    return out;
+  }
+  function splitsForDamages(items){
+    const natural=greedy(items,8.5,false);
+    if(natural.length<2)return {counts:natural, font:8.5, compact:false};
+    // Try avoiding a short continuation, without moving already-fitting rows
+    // merely to achieve a percentage. Only the last natural page is assessed.
+    const consumed=natural.slice(0,-1).reduce((a,b)=>a+b,0);
+    const tail=items.slice(consumed);
+    const tailHeight=tail.reduce((a,x)=>a+rowHeight(x,8.5,false),0);
+    if(tailHeight/pageContentHeightPt>=0.45)return {counts:natural,font:8.5,compact:false};
+    for(const [pt,compact] of [[8.5,true],[8,true]]){
+      const alternative=greedy(items,pt,compact);
+      if(alternative.length<natural.length)return {counts:alternative,font:pt,compact};
+    }
+    return {counts:natural,font:8.5,compact:false};
+  }
+  const selected=splitsForDamages(damages);
+  const distribution=selected.counts;
+  // Keep the signature in the standard lower area even for a short table:
+  // paragraph spacing is OUTSIDE the damage table, never a fake damage row.
+  const sheetRealHeight=(offset,count)=>damages.slice(offset,offset+count)
+    .reduce((total,item)=>total+rowHeight(item,selected.font,selected.compact),0);
+  function tableSpacer(offset,count){
+    const h=sheetRealHeight(offset,count);
+    const extra=(selected.font===8 && count>=20 ? 0 : Math.max(0,540-h))+(offset>0?15:0);
+    return '<w:p><w:pPr><w:spacing w:before="'+Math.round(extra*20)+'" w:after="0"/>'+
+      '<w:contextualSpacing/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr></w:p>';
+  }
+  function insuranceTable(t){
+    // Rebuild table grid (not just cell widths): two actual columns for OSAGO,
+    // six actual columns for KASKO; no phantom narrow repair columns.
+    const widths = isOsagoTable ? [214,1000,3786] : [214,800,2686,320,340,310,330];
+    const gridWidths = isOsagoTable ? [474,2215,8385] : [474,1772,5940,710,754,688,736];
+    t=t.replace(/<w:tblGrid>[\s\S]*?<\/w:tblGrid>/,
+      '<w:tblGrid>'+gridWidths.map(w=>'<w:gridCol w:w="'+w+'"/>').join('')+'</w:tblGrid>');
+    return t.replace(/<w:tr(?:\s[^>]*)?>[\s\S]*?<\/w:tr>/g,row=>{
+      const cells=asRowCells(row);
+      if(cells.length===2 && row.includes('указанные в документах')){
+        const firstWidth=isOsagoTable?5000:3700;
+        let first=cells[0].replace(/<w:tcW[^>]*\/>/,'<w:tcW w:w="'+firstWidth+'" w:type="pct"/>')
+          .replace(/<w:gridSpan[^>]*\/>/,'<w:gridSpan w:val="3"/>');
+        if(isOsagoTable){
+          first=first.replace('</w:tc>', '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>ОСАГО</w:t></w:r></w:p></w:tc>');
+          return row.replace(cells.join(''),first);
+        }
+        const second=cells[1].replace(/<w:tcW[^>]*\/>/,'<w:tcW w:w="1300" w:type="pct"/>')
+          .replace(/<w:gridSpan[^>]*\/>/,'<w:gridSpan w:val="4"/>');
+        return row.replace(cells.join(''),first+second);
+      }
+      if(cells.length!==7)return row;
+      const newCells=(isOsagoTable?cells.slice(0,3):cells).map((c,i)=>{
+        let x=c.replace(/<w:tcW[^>]*\/>/,'<w:tcW w:w="'+widths[i]+'" w:type="pct"/>');
+        x=x.replace(/<w:gridSpan[^>]*\/>/g,'');
+        if(i>=3){
+          x=x.replace(/<w:jc w:val="(?:left|right|both)"\/>/g,'<w:jc w:val="center"/>');
+          x=x.replace(/<w:pPr(?:\s[^>]*)?>/g,'<w:pPr><w:jc w:val="center"/>');
+          if(!x.includes('<w:pPr'))x=x.replace(/<w:p(?:\s[^>]*)?>/,'<w:p><w:pPr><w:jc w:val="center"/></w:pPr>');
+          x=x.replace(/<w:tcMar>[\s\S]*?<\/w:tcMar>/g,'');
+        }
+        return x;
+      });
+      if(!isOsagoTable && row.includes('Описание повреждения')){
+        newCells[5]=newCells[5].replace('Окрас.','Окраска');
+        newCells[6]=newCells[6].replace(/<w:t(?:\s[^>]*)?>Диагн\.<\/w:t>/,
+          '<w:t>Диаг-</w:t><w:br/><w:t>ностика</w:t>');
+      }
+      let joined=row.replace(cells.join(''),newCells.join(''));
+      if(isOsagoTable) return joined;
+      return joined;
+    });
+  }
+  function makeTable(start,count,final){
+    const numberRows=Array.from({length:count},(_,i)=>{
+      let r=damageRow(damageRows[2+(i%17)],start+i+1,damages[start+i]);
+      // Remove template fixed minimum row height. Each real row follows text.
+      r=r.replace(/<w:trHeight[^>]*\/>/g,'');
+      r=r.replace(/<w:tcMar>[\s\S]*?<\/w:tcMar>/g,m=>m.replace(/<w:(top|bottom) w:w="\d+"/g,(_,side)=>'<w:'+side+' w:w="'+(selected.compact?12:30)+'"'));
+      r=r.replace(/<w:sz w:val="17"\/>/g,'<w:sz w:val="'+Math.round(selected.font*2)+'"/>');
+      r=r.replace(/<w:szCs w:val="17"\/>/g,'<w:szCs w:val="'+Math.round(selected.font*2)+'"/>');
+      r=r.replace(/w:line="190"/g,'w:line="'+Math.round(selected.font*(selected.compact?21:22.35))+'"');
+      return r;
+    });
+    const header = consolidateRow(damageRows[1], 'Повреждённая деталь','Описание повреждения');
+    const titleRow = isOsagoTable ? damageRows[0].replace(/<w:t>КАСКО<\/w:t>/g,'<w:t>ОСАГО</w:t>') : damageRows[0];
+    const table = prefix+[titleRow,header,...numberRows,...final?[damageRows[36]]:[]].join('')+suffix;
+    return insuranceTable(table);
+
+  }
+  const firstTable=makeTable(0,distribution[0],distribution.length===1);
+  xml=xml.replace(damageTableOriginal,firstTable);
+  // Insert spacer before the original footer marker on page 3.
+  const afterFirst=xml.indexOf(firstTable)+firstTable.length;
+  xml=xml.slice(0,afterFirst)+tableSpacer(0,distribution[0])+xml.slice(afterFirst);
+  if(distribution.length>1){
+    let more='',offset=distribution[0];
+    for(let part=1;part<distribution.length;part++){
+      const count=distribution[part],last=part===distribution.length-1;
+      more+='<w:p><w:r><w:br w:type="page"/></w:r></w:p>'+makeTable(offset,count,last)
+        +tableSpacer(offset,count)+sheetMarker+footerOriginal;
+      offset+=count;
+    }
     const at=xml.indexOf(footerOriginal,xml.indexOf(firstTable));
     if(at<0)throw new Error('Не найден блок подписи после повреждений');
     xml=xml.slice(0,at+footerOriginal.length)+more+xml.slice(at+footerOriginal.length);
   }
-
   // Точные печатные галочки: сохраняем одну отметку в каждой штатной позиции.
   // ActiveX и VML целиком заменяются обычным текстовым run, пригодным для PDF.
   const CHECK_FONT='DejaVu Sans';
@@ -399,21 +514,35 @@ try {
   }
   // отметка ремонтопригодности проставлена непосредственно в таблице
   // Ремонтные воздействия КАСКО: точные ячейки после объединённой графы.
-  let globalRepairIndex=0;
+  // Bind KASKO operations to the printed global damage row number, not
+  // the physical row count, table number or page continuation offset.
   xml=xml.replace(/<w:tbl(?:\s[^>]*)?>[\s\S]*?<\/w:tbl>/g,t=>{
-    if(!t.includes('Наименование повреждённой детали и описание повреждения'))return t;
-    let ri=-1;return t.replace(rowRE,r=>{
-      ri++;if(ri<2 || ri>=2+damageRowsPerSheet || globalRepairIndex>=damages.length)return r;
-      const k=KASKO_REPAIRS[globalRepairIndex++]||{};
-      // В ОСАГО ремонтные воздействия в таблице КАСКО не проставляются.
-      if(String(CHECKS.insurance||'').toUpperCase()!=='КАСКО')return r;
+    if(!t.includes('Описание повреждения'))return t;
+    let ri=-1;
+    return t.replace(rowRE,r=>{
+      ri++;
+      if(ri<2)return r;
       const cells=[...r.matchAll(cellRE)].map(m=>m[0]);
-      for(let i=cells.length-1;i>=0;i--){
-        const key={2:'zamena',3:'remont',4:'okraska',5:'diagn'}[i];
-        if(!key || !k[key])continue;
-        // По решению эксперта от 19.11.2026: в «Ремонт, час» ставится X
-        // даже без расчёта нормо-часов. Никакие часы не выдумывать.
-        r=r.replace(cells[i],setCell(cells[i],'X'));
+      const match=cells[0]&&cells[0].match(/<w:t(?:\s[^>]*)?>(\d{1,3})<\/w:t>/);
+      if(!match)return r;
+      const idx=Number(match[1])-1;
+      if(idx<0 || idx>=damages.length) return r;
+      if(String(CHECKS.insurance||'').toUpperCase()!=='КАСКО')return r;
+      const k=KASKO_REPAIRS[idx]||{};
+      for(let i=cells.length-1;i>=3;i--){
+        const key={3:'zamena',4:'remont',5:'okraska',6:'diagn'}[i];
+        if(!key)continue;
+        const raw=k[key];
+        let printed='';
+        if(key==='remont'){
+          if(raw===true)printed='X';
+          else if(typeof raw==='number' || (typeof raw==='string' && raw.trim()))printed=String(raw).replace('.',',');
+        }else if(raw===true)printed='X';
+        if(printed){
+          let c=setCell(cells[i],printed);
+          c=c.replace(/<w:pPr(?:\s[^>]*)?>/g,'<w:pPr><w:jc w:val="center"/>');
+          r=r.replace(cells[i],c);
+        }
       }
       return r;
     });
@@ -569,13 +698,10 @@ try {
     });
   }
   trimEmptyTable(4,2);trimEmptyTable(5,2);
-  trimEmptyTable(9,2);trimEmptyTable(10,2);trimEmptyTable(15,7);
-  // Номер таблицы с выводами меняется при добавлении листов повреждений.
-  xml=xml.replace(tblRE,t=>t.includes('Выводы по результатам ') && t.includes('первичного/дополнительного осмотра')
-    ? t.replace(/<w:trHeight w:val="(\d+)"/g,(_m,n)=>`<w:trHeight w:val="${Math.round(Number(n)*0.73)}"`)
-    : t);
+  trimEmptyTable(9,2);trimEmptyTable(10,2);
+  editTable(16,t=>t.replace(/<w:trHeight w:val="(\d+)"/g,(m,n)=>`<w:trHeight w:val="${Math.round(Number(n)*0.73)}"`));
 
-  // Заключение начинается с нового листа сразу после последней таблицы повреждений.
+  // Четвёртый лист начинается целым блоком заключения.
   const conclusionTable=[...xml.matchAll(tblRE)].find(m=>m[0].includes('Характер описанных повреждений'));
   if(conclusionTable) xml=xml.slice(0,conclusionTable.index)+'<w:p><w:r><w:br w:type="page"/></w:r></w:p>'+xml.slice(conclusionTable.index);
   // Владелец информирован, но акт не подписан им.
@@ -677,6 +803,15 @@ try {
     const pAt=matches.length?matches[matches.length-1].index:-1;
     if(pAt>=0)xml=xml.slice(0,pAt)+'<w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>'+xml.slice(pAt);
   }
+  // Строго: лист с повреждениями ВСЕГДА начинается с новой страницы (лист 3).
+  // Разрыв ставится до всей таблицы, а не внутри её первой строки.
+  const damageHead=damages[0].detail;
+  const dmgHeadAt=xml.indexOf(damageHead);
+  if(dmgHeadAt<0) throw new Error('Не найден заголовок листа повреждений');
+  const dmgTableAt=xml.lastIndexOf('<w:tbl>',dmgHeadAt);
+  if(dmgTableAt<0) throw new Error('Не найдена таблица повреждений');
+  // removed duplicated damage break
+
   // Динамические строки в двух разделах первого листа.
   // При отсутствии записей оставляем 1 пустую строку и исходную отметку.
   // При наличии записей автоматически увеличиваем высоту ячейки.
@@ -832,7 +967,7 @@ try {
     return t;
   });
   // Разрыв перед целой таблицей ДТП, а не перед её первой ячейкой.
-  const dmgStart=[...xml.matchAll(tblRE)].find(m=>m[0].includes('Наименование повреждённой детали и описание повреждения'));
+  const dmgStart=[...xml.matchAll(tblRE)].find(m=>m[0].includes('Описание повреждения'));
   if(!dmgStart)throw new Error('Нет таблицы ДТП для разрыва страницы');
   xml=xml.slice(0,dmgStart.index)+'<w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>'+xml.slice(dmgStart.index);
   // Убираем печатную инструкцию про варианты состояния, которые уже заполнены.
